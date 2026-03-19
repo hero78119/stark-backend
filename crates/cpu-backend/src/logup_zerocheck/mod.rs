@@ -1447,7 +1447,7 @@ where
     };
 
     let (frac_sum_proof, mut xi) =
-        fractional_sumcheck::<SC, _>(transcript, &gkr_input_evals, true)?;
+        fractional_sumcheck::<SC, _>(transcript, &gkr_input_evals, false)?;
 
     let n_global = max(n_max, n_logup);
     debug!(%n_global);
