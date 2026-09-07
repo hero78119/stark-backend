@@ -740,8 +740,11 @@ where
             if !virtual_input {
                 let half = total_leaves / 2;
                 let second_half_ptr = layer.as_mut_raw_ptr() as *mut Frac<EF>;
-                let second_half_buf =
-                    DeviceBuffer::<Frac<EF>>::from_raw_parts(second_half_ptr.add(half), half);
+                let second_half_buf = DeviceBuffer::<Frac<EF>>::from_raw_parts(
+                    second_half_ptr.add(half),
+                    half,
+                    device_ctx.device_id,
+                );
                 frac_add_alpha(&second_half_buf, alpha, stream)
                     .map_err(FractionalSumcheckError::SegmentTree)?;
                 std::mem::forget(second_half_buf);

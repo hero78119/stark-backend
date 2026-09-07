@@ -2,15 +2,16 @@ use std::{
     collections::HashMap,
     ffi::c_void,
     ptr::NonNull,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use bytesize::ByteSize;
 
 use crate::{
+    common::set_device_by_id,
     error::{check, MemoryError},
-    stream::{cudaStream_t, device_synchronize, StreamGuard},
+    stream::{cudaStream_t, device_synchronize, GpuDeviceCtx, StreamGuard},
 };
 
 mod cuda;
@@ -27,7 +28,9 @@ extern "C" {
     fn cudaMemGetInfo(free: *mut usize, total: *mut usize) -> i32;
 }
 
-static MEMORY_MANAGER: OnceLock<Mutex<MemoryManager>> = OnceLock::new();
+type DeviceManagers = HashMap<u32, Arc<Mutex<MemoryManager>>>;
+
+static MEMORY_MANAGERS: OnceLock<Mutex<DeviceManagers>> = OnceLock::new();
 
 pub fn device_memory_used() -> usize {
     let mut free = 0usize;
@@ -36,10 +39,16 @@ pub fn device_memory_used() -> usize {
     total - free
 }
 
-#[ctor::ctor]
-fn init() {
-    let _ = MEMORY_MANAGER.set(Mutex::new(MemoryManager::new()));
-    tracing::info!("Memory manager initialized at program start");
+fn managers() -> &'static Mutex<DeviceManagers> {
+    MEMORY_MANAGERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn manager_for_device(device_id: u32) -> Result<Arc<Mutex<MemoryManager>>, MemoryError> {
+    let mut managers = managers().lock().map_err(|_| MemoryError::LockError)?;
+    Ok(managers
+        .entry(device_id)
+        .or_insert_with(|| Arc::new(Mutex::new(MemoryManager::new(device_id))))
+        .clone())
 }
 
 /// Allocation record for the small-allocation path (`cudaMallocAsync`).
@@ -49,6 +58,7 @@ struct AllocRecord {
 }
 
 pub struct MemoryManager {
+    device_id: u32,
     pool: VirtualMemoryPool,
     allocated_ptrs: HashMap<NonNull<c_void>, AllocRecord>,
     current_size: usize,
@@ -62,11 +72,12 @@ unsafe impl Send for MemoryManager {}
 unsafe impl Sync for MemoryManager {}
 
 impl MemoryManager {
-    pub fn new() -> Self {
-        // Create virtual memory pool
-        let pool = VirtualMemoryPool::default();
+    pub fn new(device_id: u32) -> Self {
+        set_device_by_id(device_id as i32).expect("failed to bind CUDA memory-manager device");
+        let pool = VirtualMemoryPool::new(device_id as i32, Default::default());
 
         Self {
+            device_id,
             pool,
             allocated_ptrs: HashMap::new(),
             current_size: 0,
@@ -79,6 +90,7 @@ impl MemoryManager {
         size: usize,
         stream: &StreamGuard,
     ) -> Result<*mut c_void, MemoryError> {
+        set_device_by_id(self.device_id as i32)?;
         assert!(size != 0, "Requested size must be non-zero");
 
         let mut tracked_size = size;
@@ -116,6 +128,7 @@ impl MemoryManager {
     /// - The caller must ensure that `ptr` is not used after this function is called.
     /// - The caller must hold the `MEMORY_MANAGER` lock before calling this method.
     unsafe fn d_free_under_lock(&mut self, ptr: *mut c_void) -> Result<StreamGuard, MemoryError> {
+        set_device_by_id(self.device_id as i32)?;
         let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
 
         if let Some(record) = self.allocated_ptrs.remove(&nn) {
@@ -136,6 +149,7 @@ impl MemoryManager {
 
 impl Drop for MemoryManager {
     fn drop(&mut self) {
+        set_device_by_id(self.device_id as i32).unwrap();
         device_synchronize().unwrap();
         let ptrs: Vec<*mut c_void> = self.allocated_ptrs.keys().map(|nn| nn.as_ptr()).collect();
         for &ptr in &ptrs {
@@ -147,23 +161,25 @@ impl Drop for MemoryManager {
     }
 }
 
-impl Default for MemoryManager {
-    fn default() -> Self {
-        Self::new()
+pub fn d_malloc_on(size: usize, device_ctx: &GpuDeviceCtx) -> Result<*mut c_void, MemoryError> {
+    if device_ctx.device_id != device_ctx.stream.device_id() {
+        return Err(MemoryError::DeviceMismatch {
+            context_device: device_ctx.device_id,
+            stream_device: device_ctx.stream.device_id(),
+        });
     }
-}
-
-pub fn d_malloc_on(size: usize, stream: &StreamGuard) -> Result<*mut c_void, MemoryError> {
-    let manager = MEMORY_MANAGER.get().unwrap();
+    set_device_by_id(device_ctx.device_id as i32)?;
+    let manager = manager_for_device(device_ctx.device_id)?;
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
-    manager.d_malloc_on(size, stream)
+    manager.d_malloc_on(size, &device_ctx.stream)
 }
 
 /// # Safety
 /// The pointer `ptr` must be a valid, previously allocated device pointer.
 /// The caller must ensure that `ptr` is not used after this function is called.
-pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
-    let manager = MEMORY_MANAGER.get().unwrap();
+pub unsafe fn d_free_on(ptr: *mut c_void, device_id: u32) -> Result<(), MemoryError> {
+    set_device_by_id(device_id as i32)?;
+    let manager = manager_for_device(device_id)?;
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
     let guard = manager.d_free_under_lock(ptr)?;
     drop(manager);
@@ -171,21 +187,54 @@ pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
     Ok(())
 }
 
+/// Synchronize and release all cached allocation state for an idle CUDA device.
+pub fn synchronize_and_trim_device(device_id: u32) -> Result<(), MemoryError> {
+    set_device_by_id(device_id as i32)?;
+    device_synchronize()?;
+    let manager = {
+        let mut managers = managers().lock().map_err(|_| MemoryError::LockError)?;
+        let Some(manager) = managers.get(&device_id) else {
+            return Ok(());
+        };
+        let allocated_bytes = manager
+            .lock()
+            .map_err(|_| MemoryError::LockError)?
+            .current_size;
+        if allocated_bytes != 0 {
+            return Err(MemoryError::ActiveAllocations {
+                device_id,
+                allocated_bytes,
+            });
+        }
+        managers.remove(&device_id).unwrap()
+    };
+    drop(manager);
+    device_synchronize()?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct MemTracker {
     current: usize,
+    device_id: u32,
     label: &'static str,
 }
 
 impl MemTracker {
     pub fn start(label: &'static str) -> Self {
-        let current = MEMORY_MANAGER
-            .get()
-            .and_then(|m| m.lock().ok())
-            .map(|m| m.current_size)
+        let device_id = crate::common::get_device().unwrap_or_default() as u32;
+        let current = managers()
+            .lock()
+            .ok()
+            .and_then(|managers| managers.get(&device_id).cloned())
+            .and_then(|manager| manager.lock().ok().map(|manager| manager.current_size))
             .unwrap_or_default();
 
-        Self { current, label }
+        Self {
+            current,
+            device_id,
+            label,
+        }
     }
 
     pub fn start_and_reset_peak(label: &'static str) -> Self {
@@ -199,9 +248,14 @@ impl MemTracker {
     }
 
     pub fn emit_metrics_with_label(&self, label: &'static str) {
-        let Some(manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) else {
+        let Some(manager) = managers()
+            .lock()
+            .ok()
+            .and_then(|managers| managers.get(&self.device_id).cloned())
+        else {
             return;
         };
+        let Ok(manager) = manager.lock() else { return };
 
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -221,10 +275,15 @@ impl MemTracker {
 
     #[inline]
     pub fn tracing_info(&self, msg: impl Into<Option<&'static str>>) {
-        let Some(manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) else {
+        let Some(manager) = managers()
+            .lock()
+            .ok()
+            .and_then(|managers| managers.get(&self.device_id).cloned())
+        else {
             tracing::error!("Memory manager not available");
             return;
         };
+        let Ok(manager) = manager.lock() else { return };
         let current = manager.current_size;
         let peak = manager.max_used_size;
         let used = current as isize - self.current as isize;
@@ -243,8 +302,14 @@ impl MemTracker {
     }
 
     pub fn reset_peak(&mut self) {
-        if let Some(mut manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) {
-            manager.max_used_size = manager.current_size;
+        let manager = managers()
+            .lock()
+            .ok()
+            .and_then(|managers| managers.get(&self.device_id).cloned());
+        if let Some(manager) = manager {
+            if let Ok(mut manager) = manager.lock() {
+                manager.max_used_size = manager.current_size;
+            }
         }
     }
 }

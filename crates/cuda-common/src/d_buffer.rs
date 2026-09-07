@@ -2,7 +2,7 @@ use std::{ffi::c_void, fmt::Debug, ptr};
 
 use crate::{
     error::{check, CudaError},
-    memory_manager::{d_free, d_malloc_on},
+    memory_manager::{d_free_on, d_malloc_on},
     stream::{cudaStream_t, GpuDeviceCtx},
 };
 
@@ -18,6 +18,7 @@ extern "C" {
 pub struct DeviceBuffer<T> {
     ptr: *mut T,
     len: usize,
+    device_id: Option<u32>,
     #[cfg(feature = "debug-cuda-stream")]
     alloc_stream: cudaStream_t,
 }
@@ -44,6 +45,7 @@ impl<T> DeviceBuffer<T> {
         DeviceBuffer {
             ptr: ptr::null_mut(),
             len: 0,
+            device_id: None,
             #[cfg(feature = "debug-cuda-stream")]
             alloc_stream: std::ptr::null_mut(),
         }
@@ -55,10 +57,11 @@ impl<T> DeviceBuffer<T> {
     /// - Dropping the constructed buffer will attempt to free the memory. As such, `ptr` must
     ///   either have been allocated by the internal memory manager (VPMM) or the caller must use
     ///   `ManuallyDrop` to prevent double-free.
-    pub unsafe fn from_raw_parts(ptr: *mut T, len: usize) -> Self {
+    pub unsafe fn from_raw_parts(ptr: *mut T, len: usize, device_id: u32) -> Self {
         DeviceBuffer {
             ptr,
             len,
+            device_id: Some(device_id),
             #[cfg(feature = "debug-cuda-stream")]
             alloc_stream: std::ptr::null_mut(),
         }
@@ -74,7 +77,7 @@ impl<T> DeviceBuffer<T> {
         );
         assert_ne!(len, 0, "Zero capacity request is wrong");
         let size_bytes = std::mem::size_of::<T>() * len;
-        let raw_ptr = d_malloc_on(size_bytes, &device_ctx.stream).expect("GPU allocation failed");
+        let raw_ptr = d_malloc_on(size_bytes, device_ctx).expect("GPU allocation failed");
         #[cfg(feature = "touchemall")]
         {
             unsafe {
@@ -86,6 +89,7 @@ impl<T> DeviceBuffer<T> {
         DeviceBuffer {
             ptr: typed_ptr,
             len,
+            device_id: Some(device_ctx.device_id),
             #[cfg(feature = "debug-cuda-stream")]
             alloc_stream: device_ctx.stream.as_raw(),
         }
@@ -96,6 +100,12 @@ impl<T> DeviceBuffer<T> {
     /// The caller should use the same stream that allocated this buffer.
     /// `fill_zero` is async; same-stream guarantees ordering without explicit sync.
     pub fn fill_zero_on(&self, device_ctx: &GpuDeviceCtx) -> Result<(), CudaError> {
+        if let Some(device_id) = self.device_id {
+            assert_eq!(
+                device_id, device_ctx.device_id,
+                "fill_zero_on: buffer/context device mismatch"
+            );
+        }
         if self.len == 0 {
             return Ok(());
         }
@@ -122,6 +132,12 @@ impl<T> DeviceBuffer<T> {
         start_idx: usize,
         device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError> {
+        if let Some(device_id) = self.device_id {
+            assert_eq!(
+                device_id, device_ctx.device_id,
+                "fill_zero_suffix_on: buffer/context device mismatch"
+            );
+        }
         assert!(
             start_idx <= self.len,
             "start index has to be smaller than or equal to length"
@@ -149,6 +165,11 @@ impl<T> DeviceBuffer<T> {
     /// Returns the number of elements in this buffer.
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Returns the CUDA device that owns this allocation, or `None` for an empty buffer.
+    pub fn device_id(&self) -> Option<u32> {
+        self.device_id
     }
 
     /// Returns whether the buffer is empty (null pointer or zero length).
@@ -192,6 +213,7 @@ impl<T> DeviceBuffer<T> {
         let res = DeviceBuffer {
             ptr: self.ptr as *mut U,
             len: self.len * (size_of::<T>() / size_of::<U>()),
+            device_id: self.device_id,
             #[cfg(feature = "debug-cuda-stream")]
             alloc_stream: self.alloc_stream,
         };
@@ -221,7 +243,12 @@ impl<T> Drop for DeviceBuffer<T> {
             // This is correct even when Drop runs on a different thread —
             // CUDA handles cross-thread stream operations safely.
             unsafe {
-                d_free(self.ptr as *mut c_void).expect("GPU free failed");
+                d_free_on(
+                    self.ptr as *mut c_void,
+                    self.device_id
+                        .expect("non-empty device buffer has no device identity"),
+                )
+                .expect("GPU free failed");
             }
             self.ptr = ptr::null_mut();
             self.len = 0;
@@ -269,5 +296,18 @@ mod tests {
         let d_array = v.to_device_on(&device_ctx).unwrap();
         d_array.fill_zero_on(&device_ctx).unwrap();
         assert_eq!(d_array.to_host_on(&device_ctx).unwrap(), vec![0; v.len()]);
+    }
+
+    #[test]
+    #[should_panic(expected = "fill_zero_on: buffer/context device mismatch")]
+    fn test_device_buffer_fill_zero_rejects_mismatched_context() {
+        let device_ctx = test_ctx();
+        let buffer = DeviceBuffer::<u32>::with_capacity_on(4, &device_ctx);
+        let forged_ctx = GpuDeviceCtx {
+            device_id: device_ctx.device_id + 1,
+            stream: device_ctx.stream.clone(),
+        };
+
+        let _ = buffer.fill_zero_on(&forged_ctx);
     }
 }

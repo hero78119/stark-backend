@@ -29,6 +29,21 @@ extern "C" {
     ) -> i32;
 }
 
+fn ensure_buffer_device<T>(
+    buffer: &DeviceBuffer<T>,
+    device_ctx: &GpuDeviceCtx,
+) -> Result<(), MemCopyError> {
+    if let Some(buffer_device) = buffer.device_id() {
+        if buffer_device != device_ctx.device_id {
+            return Err(MemCopyError::DeviceMismatch {
+                buffer_device,
+                context_device: device_ctx.device_id,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// FFI binding for `cudaMemcpyAsync` on an explicit stream.
 ///
 /// # Safety
@@ -70,6 +85,7 @@ impl<T> MemCopyH2D<T> for [T] {
         dst: &mut DeviceBuffer<T>,
         device_ctx: &GpuDeviceCtx,
     ) -> Result<(), MemCopyError> {
+        ensure_buffer_device(dst, device_ctx)?;
         if self.len() > dst.len() {
             return Err(MemCopyError::SizeMismatch {
                 operation: "copy_to_on",
@@ -105,6 +121,7 @@ pub trait MemCopyD2H<T> {
 
 impl<T> MemCopyD2H<T> for DeviceBuffer<T> {
     fn to_host_on(&self, device_ctx: &GpuDeviceCtx) -> Result<Vec<T>, MemCopyError> {
+        ensure_buffer_device(self, device_ctx)?;
         let mut host_vec = Vec::with_capacity(self.len());
         let size_bytes = std::mem::size_of::<T>() * self.len();
 
@@ -149,6 +166,8 @@ impl<T> MemCopyD2D<T> for DeviceBuffer<T> {
         dst: &mut DeviceBuffer<T>,
         device_ctx: &GpuDeviceCtx,
     ) -> Result<(), MemCopyError> {
+        ensure_buffer_device(self, device_ctx)?;
+        ensure_buffer_device(dst, device_ctx)?;
         if self.len() > dst.len() {
             return Err(MemCopyError::SizeMismatch {
                 operation: "device_copy_to_on",
@@ -194,5 +213,38 @@ mod tests {
 
         assert_eq!(h, h1, "First device buffer mismatch");
         assert_eq!(h, h2, "Second device buffer mismatch");
+    }
+
+    #[test]
+    fn test_mem_copy_rejects_mismatched_context_before_submission() {
+        let device_ctx = test_ctx();
+        let mut buffer = DeviceBuffer::<u32>::with_capacity_on(4, &device_ctx);
+        let forged_ctx = GpuDeviceCtx {
+            device_id: device_ctx.device_id + 1,
+            stream: device_ctx.stream.clone(),
+        };
+
+        assert!(matches!(
+            [1, 2, 3, 4].copy_to_on(&mut buffer, &forged_ctx),
+            Err(MemCopyError::DeviceMismatch { .. })
+        ));
+        assert!(matches!(
+            buffer.to_host_on(&forged_ctx),
+            Err(MemCopyError::DeviceMismatch { .. })
+        ));
+
+        let mut destination = DeviceBuffer::<u32>::with_capacity_on(4, &device_ctx);
+        assert!(matches!(
+            buffer.device_copy_to_on(&mut destination, &forged_ctx),
+            Err(MemCopyError::DeviceMismatch { .. })
+        ));
+
+        let mut wrong_device_destination = unsafe {
+            DeviceBuffer::<u32>::from_raw_parts(std::ptr::null_mut(), 0, device_ctx.device_id + 1)
+        };
+        assert!(matches!(
+            buffer.device_copy_to_on(&mut wrong_device_destination, &device_ctx),
+            Err(MemCopyError::DeviceMismatch { .. })
+        ));
     }
 }

@@ -10,7 +10,7 @@ use bytesize::ByteSize;
 
 use super::cuda::*;
 use crate::{
-    common::set_device,
+    common::{get_device, set_device_by_id},
     error::MemoryError,
     stream::{device_synchronize, CudaEvent, CudaStream, StreamGuard},
 };
@@ -161,8 +161,8 @@ unsafe impl Send for VirtualMemoryPool {}
 unsafe impl Sync for VirtualMemoryPool {}
 
 impl VirtualMemoryPool {
-    pub(super) fn new(config: VpmmConfig) -> Self {
-        let device_id = set_device().unwrap();
+    pub(super) fn new(device_id: i32, config: VpmmConfig) -> Self {
+        set_device_by_id(device_id).unwrap();
 
         // Check VPMM support and resolve page_size
         let (root, page_size, va_size) = unsafe {
@@ -795,7 +795,7 @@ impl Drop for VirtualMemoryPool {
 
 impl Default for VirtualMemoryPool {
     fn default() -> Self {
-        Self::new(VpmmConfig::from_env())
+        Self::new(get_device().unwrap(), VpmmConfig::from_env())
     }
 }
 
@@ -869,7 +869,7 @@ mod tests {
             va_size: 1 << 30,
             initial_pages: 2,
         };
-        let mut pool = VirtualMemoryPool::new(config);
+        let mut pool = VirtualMemoryPool::new(crate::common::get_device().unwrap(), config);
 
         if pool.page_size == usize::MAX {
             println!("VPMM not supported, skipping test");

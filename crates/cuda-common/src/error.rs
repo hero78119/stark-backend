@@ -85,6 +85,20 @@ pub enum MemoryError {
     #[error("Failed to acquire memory manager lock")]
     LockError,
 
+    #[error(
+        "CUDA device mismatch: context device {context_device}, stream device {stream_device}"
+    )]
+    DeviceMismatch {
+        context_device: u32,
+        stream_device: u32,
+    },
+
+    #[error("Cannot trim CUDA device {device_id}: {allocated_bytes} bytes remain allocated")]
+    ActiveAllocations {
+        device_id: u32,
+        allocated_bytes: usize,
+    },
+
     #[error("Invalid memory size: {size}")]
     InvalidMemorySize { size: usize },
 
@@ -109,6 +123,13 @@ pub enum MemoryError {
 pub enum MemCopyError {
     #[error(transparent)]
     Cuda(#[from] CudaError),
+    #[error(
+        "CUDA device mismatch: buffer device {buffer_device}, context device {context_device}"
+    )]
+    DeviceMismatch {
+        buffer_device: u32,
+        context_device: u32,
+    },
     #[error("Size mismatch in {operation}: src len={src_len}, dst len={dst_len}")]
     SizeMismatch {
         operation: &'static str,

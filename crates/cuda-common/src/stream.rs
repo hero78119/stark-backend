@@ -5,7 +5,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::error::{check, CudaError};
+use crate::{
+    common::{get_device, set_device_by_id},
+    error::{check, CudaError},
+};
 
 #[link(name = "cudart")]
 extern "C" {
@@ -31,6 +34,7 @@ pub type cudaStream_t = *mut c_void;
 
 pub struct CudaStream {
     stream: cudaStream_t,
+    device_id: u32,
     host_event: Mutex<CudaEvent>,
 }
 
@@ -54,10 +58,15 @@ impl CudaStream {
     /// with `cudaStreamNonBlocking`. Non-blocking streams have no implicit
     /// synchronization with the legacy default stream (stream 0).
     pub fn new_non_blocking() -> Result<Self, CudaError> {
+        let device_id = get_device()? as u32;
         let mut stream: cudaStream_t = std::ptr::null_mut();
         check(unsafe { cudaStreamCreateWithFlags(&mut stream, CUDA_STREAM_NON_BLOCKING) })?;
         let host_event = Mutex::new(CudaEvent::new()?);
-        Ok(Self { stream, host_event })
+        Ok(Self {
+            stream,
+            device_id,
+            host_event,
+        })
     }
 
     /// Get the raw CUDA stream handle.
@@ -66,13 +75,23 @@ impl CudaStream {
         self.stream
     }
 
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
     /// Synchronize this stream.
     pub fn synchronize(&self) -> Result<(), CudaError> {
+        set_device_by_id(self.device_id as i32)?;
         check(unsafe { cudaStreamSynchronize(self.stream) })
     }
 
     /// Wait for the given event.
     pub fn wait(&self, event: &CudaEvent) -> Result<(), CudaError> {
+        assert_eq!(
+            self.device_id, event.device_id,
+            "CUDA event/stream device mismatch"
+        );
+        set_device_by_id(self.device_id as i32)?;
         check(unsafe { cudaStreamWaitEvent(self.stream, event.event, 0) })
     }
 
@@ -81,6 +100,7 @@ impl CudaStream {
     /// only for work up to the event point, allowing future selective sync patterns
     /// (e.g., wait for a specific copy without draining the entire stream).
     pub fn to_host_sync(&self) -> Result<(), CudaError> {
+        set_device_by_id(self.device_id as i32)?;
         let event = self.host_event.lock().unwrap();
         unsafe { event.record(self.stream) }?;
         event.synchronize()
@@ -90,6 +110,7 @@ impl CudaStream {
 impl Drop for CudaStream {
     fn drop(&mut self) {
         if !self.stream.is_null() {
+            let _ = set_device_by_id(self.device_id as i32);
             // Non-blocking: CUDA defers destruction until the stream is idle
             let err = unsafe { cudaStreamDestroy(self.stream) };
             debug_assert_eq!(err, 0, "cudaStreamDestroy failed with error code: {err}");
@@ -217,6 +238,7 @@ impl Ord for CudaEventStatus {
 #[derive(Debug)]
 pub struct CudaEvent {
     event: cudaEvent_t,
+    device_id: u32,
 }
 
 unsafe impl Send for CudaEvent {}
@@ -224,23 +246,31 @@ unsafe impl Sync for CudaEvent {}
 
 impl CudaEvent {
     pub fn new() -> Result<Self, CudaError> {
+        let device_id = get_device()? as u32;
         let mut event: cudaEvent_t = std::ptr::null_mut();
         check(unsafe { cudaEventCreate(&mut event) })?;
-        Ok(Self { event })
+        Ok(Self { event, device_id })
     }
 
     /// # Safety
     /// The caller must ensure that `stream` is a valid stream.
     pub unsafe fn record(&self, stream: cudaStream_t) -> Result<(), CudaError> {
+        set_device_by_id(self.device_id as i32)?;
         check(cudaEventRecord(self.event, stream))
     }
 
     /// Record this event on the given `CudaStream` (safe wrapper).
     pub fn record_on(&self, stream: &CudaStream) -> Result<(), CudaError> {
+        assert_eq!(
+            self.device_id, stream.device_id,
+            "CUDA event/stream device mismatch"
+        );
+        set_device_by_id(self.device_id as i32)?;
         check(unsafe { cudaEventRecord(self.event, stream.as_raw()) })
     }
 
     pub fn synchronize(&self) -> Result<(), CudaError> {
+        set_device_by_id(self.device_id as i32)?;
         check(unsafe { cudaEventSynchronize(self.event) })
     }
 
@@ -252,6 +282,9 @@ impl CudaEvent {
     }
 
     pub fn status(&self) -> CudaEventStatus {
+        if let Err(error) = set_device_by_id(self.device_id as i32) {
+            return CudaEventStatus::Error(error);
+        }
         let status = unsafe { cudaEventQuery(self.event) };
         match status {
             0 => CudaEventStatus::Completed,  // CUDA_SUCCESS
@@ -267,6 +300,7 @@ impl CudaEvent {
 
 impl Drop for CudaEvent {
     fn drop(&mut self) {
+        let _ = set_device_by_id(self.device_id as i32);
         let err = unsafe { cudaEventDestroy(self.event) };
         debug_assert_eq!(err, 0, "cudaEventDestroy failed with error code: {err}");
     }
@@ -300,4 +334,23 @@ pub fn gpu_metrics_span_on<R, F: FnOnce() -> R>(
 
     metrics::gauge!(name.into()).set(elapsed_ms as f64);
     Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_and_event_preserve_device_identity() {
+        let device_id = get_device().unwrap() as u32;
+        let stream = CudaStream::new_non_blocking().unwrap();
+        let event = CudaEvent::new().unwrap();
+
+        assert_eq!(stream.device_id(), device_id);
+        assert_eq!(event.device_id, device_id);
+        event.record_on(&stream).unwrap();
+        stream.wait(&event).unwrap();
+        stream.synchronize().unwrap();
+        assert!(event.completed());
+    }
 }

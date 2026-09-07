@@ -1,10 +1,11 @@
 //! Tests for memory_manager - focused on edge cases and dangerous scenarios
 
 use super::{
-    d_free, d_malloc_on,
+    d_free_on, d_malloc_on, synchronize_and_trim_device,
     vm_pool::{VirtualMemoryPool, VpmmConfig},
 };
 use crate::{
+    copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::MemoryError,
     stream::{GpuDeviceCtx, StreamGuard},
@@ -13,6 +14,7 @@ use crate::{
 #[link(name = "cudart")]
 extern "C" {
     fn cudaMemGetInfo(free_bytes: *mut usize, total_bytes: *mut usize) -> i32;
+    fn cudaGetDeviceCount(count: *mut i32) -> i32;
 }
 
 fn get_gpu_free_memory() -> usize {
@@ -29,6 +31,86 @@ fn test_ctx() -> GpuDeviceCtx {
 
 fn test_stream() -> StreamGuard {
     test_ctx().stream
+}
+
+#[test]
+fn test_d_malloc_rejects_forged_context() {
+    let ctx = test_ctx();
+    let forged_ctx = GpuDeviceCtx {
+        device_id: ctx.device_id + 1,
+        stream: ctx.stream,
+    };
+
+    assert!(matches!(
+        d_malloc_on(1024, &forged_ctx),
+        Err(MemoryError::DeviceMismatch { .. })
+    ));
+}
+
+#[test]
+fn test_trim_rejects_live_buffer_then_reinitializes() {
+    let ctx = test_ctx();
+    let device_id = ctx.device_id;
+    let buffer = DeviceBuffer::<u8>::with_capacity_on(1024, &ctx);
+
+    assert!(matches!(
+        synchronize_and_trim_device(device_id),
+        Err(MemoryError::ActiveAllocations {
+            device_id: error_device,
+            allocated_bytes: 1024,
+        }) if error_device == device_id
+    ));
+
+    drop(buffer);
+    synchronize_and_trim_device(device_id).unwrap();
+
+    let reinitialized = DeviceBuffer::<u8>::with_capacity_on(1024, &ctx);
+    assert_eq!(reinitialized.device_id(), Some(device_id));
+    drop(reinitialized);
+    synchronize_and_trim_device(device_id).unwrap();
+}
+
+#[test]
+fn test_physical_two_device_allocation_copy_drop_and_trim_isolation() {
+    if std::env::var_os("OPENVM_RUN_MULTI_GPU_TESTS").as_deref() != Some("1".as_ref()) {
+        eprintln!("skipping physical multi-GPU test; set OPENVM_RUN_MULTI_GPU_TESTS=1");
+        return;
+    }
+
+    let mut device_count = 0;
+    let result = unsafe { cudaGetDeviceCount(&mut device_count) };
+    assert_eq!(result, 0, "cudaGetDeviceCount failed: {result}");
+    if device_count < 2 {
+        eprintln!("skipping physical multi-GPU test; only {device_count} CUDA device(s) visible");
+        return;
+    }
+
+    let handles: Vec<_> = (0..2u32)
+        .map(|device_id| {
+            std::thread::spawn(move || {
+                let ctx = GpuDeviceCtx::for_device(device_id).unwrap();
+                let host = vec![device_id + 1; 1024];
+                let buffer = host.to_device_on(&ctx).unwrap();
+                assert_eq!(buffer.to_host_on(&ctx).unwrap(), host);
+                ctx.stream.synchronize().unwrap();
+                (device_id, buffer)
+            })
+        })
+        .collect();
+    let mut buffers: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+
+    // Drop each allocation while another device is current. DeviceBuffer::drop must
+    // bind the allocation's recorded owner and leave the other manager untouched.
+    for (device_id, buffer) in buffers.drain(..).rev() {
+        crate::common::set_device_by_id((1 - device_id) as i32).unwrap();
+        drop(buffer);
+    }
+    for device_id in 0..2 {
+        synchronize_and_trim_device(device_id).unwrap();
+    }
 }
 
 // ============================================================================
@@ -70,7 +152,7 @@ fn test_va_exhaustion_reserves_more() {
         va_size: 4 << 20, // 4 MB VA per chunk
         initial_pages: 0,
     };
-    let mut pool = VirtualMemoryPool::new(config);
+    let mut pool = VirtualMemoryPool::new(crate::common::get_device().unwrap(), config);
 
     if pool.page_size == usize::MAX {
         println!("VPMM not supported, skipping test");
@@ -132,7 +214,7 @@ fn run_doc_scenario(
         va_size: 1 << 30, // 1 GB VA space
         initial_pages,
     };
-    let mut pool = VirtualMemoryPool::new(config);
+    let mut pool = VirtualMemoryPool::new(crate::common::get_device().unwrap(), config);
 
     if pool.page_size == usize::MAX {
         panic!("VPMM not supported");
@@ -361,7 +443,7 @@ fn test_oom_recovery_after_error() {
 
     // Fill GPU memory until we hit OOM on a 2 GB request
     loop {
-        match d_malloc_on(chunk_size, &ctx.stream) {
+        match d_malloc_on(chunk_size, &ctx) {
             Ok(ptr) => buffers.push(ptr),
             Err(MemoryError::OutOfMemory { .. }) => break,
             Err(e) => panic!("Expected OOM, got {:?}", e),
@@ -370,7 +452,7 @@ fn test_oom_recovery_after_error() {
 
     // After OOM, allocator should still succeed for smaller requests without
     // freeing the large buffers we already hold.
-    let small = d_malloc_on(1 << 20, &ctx.stream).expect("Small allocation after OOM failed");
+    let small = d_malloc_on(1 << 20, &ctx).expect("Small allocation after OOM failed");
 
     // Request just under the currently free memory to exercise the pool path.
     let free_after_oom = get_gpu_free_memory();
@@ -380,13 +462,13 @@ fn test_oom_recovery_after_error() {
         "Not enough free memory to attempt medium alloc after OOM"
     );
     let medium_req = free_after_oom - safety;
-    let medium = d_malloc_on(medium_req, &ctx.stream).expect("Pool allocation after OOM failed");
+    let medium = d_malloc_on(medium_req, &ctx).expect("Pool allocation after OOM failed");
 
     // Cleanup
-    unsafe { d_free(small).unwrap() };
-    unsafe { d_free(medium).unwrap() };
+    unsafe { d_free_on(small, ctx.device_id).unwrap() };
+    unsafe { d_free_on(medium, ctx.device_id).unwrap() };
     for ptr in buffers {
-        unsafe { d_free(ptr).unwrap() };
+        unsafe { d_free_on(ptr, ctx.device_id).unwrap() };
     }
     ctx.stream.synchronize().expect("stream sync after cleanup");
 }
@@ -402,7 +484,7 @@ fn create_test_pool(initial_pages: usize) -> VirtualMemoryPool {
         va_size: 1 << 30, // 1 GB VA space
         initial_pages,
     };
-    let pool = VirtualMemoryPool::new(config);
+    let pool = VirtualMemoryPool::new(crate::common::get_device().unwrap(), config);
     if pool.page_size == usize::MAX {
         panic!("VPMM not supported, cannot run this test");
     }
@@ -625,7 +707,7 @@ fn test_defrag_new_pages_merge_with_existing() {
         va_size: 1 << 30,
         initial_pages: 0,
     };
-    let mut pool = VirtualMemoryPool::new(config);
+    let mut pool = VirtualMemoryPool::new(crate::common::get_device().unwrap(), config);
 
     if pool.page_size == usize::MAX {
         println!("VPMM not supported, skipping test");
