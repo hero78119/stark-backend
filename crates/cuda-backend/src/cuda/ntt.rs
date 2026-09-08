@@ -197,3 +197,65 @@ pub unsafe fn ct_mixed_radix_narrow(
         stream,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use openvm_cuda_common::{copy::MemCopyH2D, stream::GpuDeviceCtx};
+    use p3_field::PrimeCharacteristicRing;
+
+    use super::{bit_rev_frac_ext_build_k2, EF};
+
+    #[link(name = "cudart")]
+    extern "C" {
+        fn cudaGetDeviceCount(count: *mut i32) -> i32;
+    }
+
+    #[test]
+    fn fused_fractional_bitrev_initializes_each_physical_device() {
+        if std::env::var_os("OPENVM_RUN_MULTI_GPU_TESTS").as_deref() != Some("1".as_ref()) {
+            eprintln!("skipping physical multi-GPU test; set OPENVM_RUN_MULTI_GPU_TESTS=1");
+            return;
+        }
+
+        let mut device_count = 0;
+        let result = unsafe { cudaGetDeviceCount(&mut device_count) };
+        assert_eq!(result, 0, "cudaGetDeviceCount failed: {result}");
+        if device_count < 2 {
+            eprintln!(
+                "skipping physical multi-GPU test; only {device_count} CUDA device(s) visible"
+            );
+            return;
+        }
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2u32)
+            .map(|device_id| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let device_ctx = GpuDeviceCtx::for_device(device_id).unwrap();
+                    let buffer = vec![(EF::ZERO, EF::ONE); 2048]
+                        .to_device_on(&device_ctx)
+                        .unwrap();
+                    barrier.wait();
+                    unsafe {
+                        bit_rev_frac_ext_build_k2(
+                            &buffer,
+                            buffer.len(),
+                            11,
+                            EF::ZERO,
+                            device_ctx.stream.as_raw(),
+                        )
+                        .unwrap();
+                    }
+                    device_ctx.stream.synchronize().unwrap();
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+}

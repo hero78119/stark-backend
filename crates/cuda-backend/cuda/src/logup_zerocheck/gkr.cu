@@ -1756,7 +1756,7 @@ T bit_rev(T i, unsigned int nbits)
 // uniform per tile, not per whole warp. The launcher uses bsize=256, chosen after
 // benchmarking: 2x faster than bsize=32 in isolation (1525 vs 754 GB/s at lg=24
 // on RTX 5090). It requires 64KB dynamic shmem per block, so cudaFuncSetAttribute
-// is used in the launcher, paid once on the first call.
+// is applied to the current device before each launch.
 __global__
 void bit_rev_frac_build_k2_kernel(
     FracExt* inout, uint32_t real_len, uint32_t lg_domain_size, FpExt alpha)
@@ -1898,8 +1898,9 @@ extern "C" int _bit_rev_frac_ext_build_k2(
     constexpr uint32_t Z_COUNT = 8;
     constexpr uint32_t bsize = 256;
     constexpr size_t shmem_bytes = (size_t)bsize * Z_COUNT * sizeof(FracExt);  // 64 KB
-    // Raise the per-block dynamic shmem limit once (static → paid on first call only).
-    static const cudaError_t shmem_err = cudaFuncSetAttribute(
+    // Function attributes are device-specific. Do not cache this process-wide: concurrent
+    // multi-GPU callers must opt in on every device before launching the 64 KB kernel.
+    cudaError_t shmem_err = cudaFuncSetAttribute(
         bit_rev_frac_build_k2_kernel,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         (int)shmem_bytes);
