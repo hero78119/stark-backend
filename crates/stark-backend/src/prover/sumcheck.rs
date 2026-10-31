@@ -316,38 +316,57 @@ where
             acc
         })
     }, "sumcheck_round");
-    // Map-Reduce
-    // Map: for each y in H_{n-1}, compute
-    // ```
-    // [W(\hat{T}_0(x, y), ..., \hat{T}_{m-1}(x, y)) for x in {1,...,d}]
-    // ```
-    // We choose to iterate over y first to avoid multiple memory accesses to `\hat{T}`s
-    let evals = (0..1 << hypercube_dim)
-        .into_par_iter()
-        .map(|y| (1..=d).map(|x| f_hat(x, y)).collect_vec());
-    // Reduce: sum over H_{n-1}
-    let hypercube_sum = |mut acc: Vec<[F; WD]>, x| {
-        for (acc, x) in acc.iter_mut().zip(x) {
-            for (acc_i, x_i) in acc.iter_mut().zip(x) {
-                *acc_i += x_i;
+    // Reuse the per-worker matrix and sum buffers instead of allocating a nested
+    // matrix for every (x, y) pair and a polynomial vector for every y.
+    let evaluate_y = |mut row_x_y: Vec<Vec<F>>, mut sums: Vec<[F; WD]>, y: usize| {
+        for x in 1..=d {
+            let x_field = F::from_usize(x);
+            for (row, mat) in row_x_y.iter_mut().zip(mats) {
+                for (value, col) in row.iter_mut().zip(mat.columns()) {
+                    let t_0 = col[y << 1];
+                    let t_1 = col[(y << 1) | 1];
+                    *value = t_0 + (t_1 - t_0) * x_field;
+                }
+            }
+            for (sum, value) in sums[x - 1].iter_mut().zip(w(x_field, y, &row_x_y)) {
+                *sum += value;
+            }
+        }
+        (row_x_y, sums)
+    };
+    let new_scratch = || {
+        (
+            mats.iter()
+                .map(|mat| vec![F::ZERO; mat.width()])
+                .collect_vec(),
+            vec![[F::ZERO; WD]; d],
+        )
+    };
+    let hypercube_sum = |mut acc: Vec<[F; WD]>, values: Vec<[F; WD]>| {
+        for (acc, values) in acc.iter_mut().zip(values) {
+            for (acc, value) in acc.iter_mut().zip(values) {
+                *acc += value;
             }
         }
         acc
     };
-    cfg_if! {
-        if #[cfg(feature = "parallel")] {
-            let evals = evals.reduce(
-                || vec![[F::ZERO; WD]; d],
-                hypercube_sum
-            );
-        } else {
-            let evals = evals.collect_vec();
-            let evals = evals.into_iter().fold(
-                vec![[F::ZERO; WD]; d],
-                hypercube_sum
-            );
+    #[cfg(feature = "parallel")]
+    let evals = (0..1 << hypercube_dim)
+        .into_par_iter()
+        .fold(
+            || new_scratch(),
+            |(row_x_y, sums), y| evaluate_y(row_x_y, sums, y),
+        )
+        .map(|(_, sums)| sums)
+        .reduce(|| vec![[F::ZERO; WD]; d], hypercube_sum);
+    #[cfg(not(feature = "parallel"))]
+    let evals = {
+        let (mut row_x_y, mut sums) = new_scratch();
+        for y in 0..1 << hypercube_dim {
+            (row_x_y, sums) = evaluate_y(row_x_y, sums, y);
         }
-    }
+        sums
+    };
     from_fn(|i| evals.iter().map(|eval| eval[i]).collect_vec())
 }
 
