@@ -101,6 +101,24 @@ p3-symmetric = { version = "=0.4.3", default-features = false }
 p3-uni-stark = { version = "=0.4.3", default-features = false }
 p3-maybe-rayon = { version = "=0.4.3", default-features = false } # the "parallel" feature is NOT on by default to allow single-threaded benchmarking
 
+# Candidate-only hiding WHIR adapter, pinned to the stable Plonky3 0.8.0 source.
+p3-whir-08 = { package = "p3-whir", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-commit-08 = { package = "p3-commit", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-challenger-08 = { package = "p3-challenger", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-dft-08 = { package = "p3-dft", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-field-08 = { package = "p3-field", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-matrix-08 = { package = "p3-matrix", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-baby-bear-08 = { package = "p3-baby-bear", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-poseidon2-08 = { package = "p3-poseidon2", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-merkle-tree-08 = { package = "p3-merkle-tree", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-multilinear-util-08 = { package = "p3-multilinear-util", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-maybe-rayon-08 = { package = "p3-maybe-rayon", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-symmetric-08 = { package = "p3-symmetric", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-security-08 = { package = "p3-security", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-sumcheck-08 = { package = "p3-sumcheck", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+p3-zk-codes-08 = { package = "p3-zk-codes", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
+rand-10 = { package = "rand", version = "=0.10.1", default-features = false, features = ["std_rng"] }
+
 # Bn254 support
 p3-bn254 = { version = "=0.4.3", default-features = false }
 zkhash = { package = "zkhash-axiom", version = "0.2.0" }

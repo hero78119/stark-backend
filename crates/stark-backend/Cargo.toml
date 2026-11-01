@@ -21,6 +21,24 @@ p3-matrix.workspace = true
 p3-maybe-rayon.workspace = true
 p3-symmetric.workspace = true
 p3-util.workspace = true
+p3-baby-bear = { workspace = true, optional = true }
+
+p3-whir-08 = { workspace = true, optional = true }
+p3-commit-08 = { workspace = true, optional = true }
+p3-challenger-08 = { workspace = true, optional = true }
+p3-dft-08 = { workspace = true, optional = true }
+p3-field-08 = { workspace = true, optional = true }
+p3-matrix-08 = { workspace = true, optional = true }
+p3-baby-bear-08 = { workspace = true, optional = true }
+p3-poseidon2-08 = { workspace = true, optional = true }
+p3-merkle-tree-08 = { workspace = true, optional = true }
+p3-multilinear-util-08 = { workspace = true, optional = true }
+p3-maybe-rayon-08 = { workspace = true, optional = true }
+p3-symmetric-08 = { workspace = true, optional = true }
+p3-security-08 = { workspace = true, optional = true }
+p3-sumcheck-08 = { workspace = true, optional = true }
+p3-zk-codes-08 = { workspace = true, optional = true }
+rand-10 = { workspace = true, optional = true }
 
 itertools.workspace = true
 rayon.workspace = true
@@ -59,7 +77,30 @@ test-case.workspace = true
 
 [features]
 default = ["parallel", "metrics"]
-parallel = ["p3-maybe-rayon/parallel"]
+parallel = [
+    "p3-maybe-rayon/parallel",
+    "p3-whir-08?/parallel",
+    "p3-maybe-rayon-08?/parallel",
+]
+hiding-whir = [
+    "dep:p3-baby-bear",
+    "dep:p3-whir-08",
+    "dep:p3-commit-08",
+    "dep:p3-challenger-08",
+    "dep:p3-dft-08",
+    "dep:p3-field-08",
+    "dep:p3-matrix-08",
+    "dep:p3-baby-bear-08",
+    "dep:p3-poseidon2-08",
+    "dep:p3-merkle-tree-08",
+    "dep:p3-multilinear-util-08",
+    "dep:p3-maybe-rayon-08",
+    "dep:p3-symmetric-08",
+    "dep:p3-security-08",
+    "dep:p3-sumcheck-08",
+    "dep:p3-zk-codes-08",
+    "dep:rand-10",
+]
 jemalloc = ["dep:tikv-jemallocator"]
 jemalloc-prof = ["jemalloc", "tikv-jemallocator?/profiling"]
 metrics = ["dep:metrics"]

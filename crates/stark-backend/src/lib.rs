@@ -37,6 +37,9 @@ pub mod soundness;
 pub mod utils;
 pub mod verifier;
 
+#[cfg(feature = "hiding-whir")]
+pub mod hiding_whir;
+
 #[cfg(feature = "lean")]
 pub mod lean;
 
