@@ -73,9 +73,15 @@ pub struct AirProvingContext<PB: ProverBackend> {
 }
 
 /// Proof on the host, with respect to the host types in the generic `PB`.
-pub struct HostProof<SC: StarkProtocolConfig, PB: ProverBackend, ConstraintsProof, OpeningProof> {
+pub struct HostProof<
+    SC: StarkProtocolConfig,
+    PB: ProverBackend,
+    ConstraintsProof,
+    OpeningProof,
+    MainCommit = <PB as ProverBackend>::Commitment,
+> {
     /// The commitment to the data in common_main.
-    pub common_main_commit: PB::Commitment,
+    pub common_main_commit: MainCommit,
 
     /// For each AIR in vkey order, the corresponding trace shape, or None if
     /// the trace is empty. In a valid proof, if `vk.per_air[i].is_required`,

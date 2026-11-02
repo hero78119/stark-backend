@@ -117,7 +117,7 @@ p3-symmetric-08 = { package = "p3-symmetric", git = "https://github.com/Plonky3/
 p3-security-08 = { package = "p3-security", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
 p3-sumcheck-08 = { package = "p3-sumcheck", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
 p3-zk-codes-08 = { package = "p3-zk-codes", git = "https://github.com/Plonky3/Plonky3", rev = "a21e3ed42905040ad49c519e402f018381c12d0c", default-features = false }
-rand-10 = { package = "rand", version = "=0.10.1", default-features = false, features = ["std_rng"] }
+rand-10 = { package = "rand", version = "=0.10.1", default-features = false, features = ["std_rng", "sys_rng"] }
 
 # Bn254 support
 p3-bn254 = { version = "=0.4.3", default-features = false }

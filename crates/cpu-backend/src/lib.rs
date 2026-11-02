@@ -19,6 +19,8 @@
 mod backend;
 mod device;
 pub mod error;
+#[cfg(feature = "hiding-whir")]
+pub mod hiding_whir;
 pub mod logup_zerocheck;
 pub mod merkle;
 mod pcs_data;

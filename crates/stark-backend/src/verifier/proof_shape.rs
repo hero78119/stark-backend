@@ -4,8 +4,11 @@ use itertools::{izip, Itertools};
 use thiserror::Error;
 
 use crate::{
-    calculate_n_logup, keygen::types::MultiStarkVerifyingKey0, proof::Proof,
-    prover::stacked_pcs::StackedLayout, StarkProtocolConfig,
+    calculate_n_logup,
+    keygen::types::MultiStarkVerifyingKey0,
+    proof::{OuterProofRef, Proof, StackingProof, WhirProof},
+    prover::stacked_pcs::StackedLayout,
+    StarkProtocolConfig,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -309,25 +312,47 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
     mvk: &MultiStarkVerifyingKey0<SC>,
     proof: &Proof<SC>,
 ) -> Result<Vec<StackedLayout>, ProofShapeError> {
+    let layouts = verify_outer_proof_shape(
+        mvk,
+        &OuterProofRef {
+            trace_vdata: &proof.trace_vdata,
+            public_values: &proof.public_values,
+            gkr_proof: &proof.gkr_proof,
+            batch_constraint_proof: &proof.batch_constraint_proof,
+            stacking_proof: &proof.stacking_proof,
+        },
+    )?;
+    verify_whir_proof_shape(mvk, &proof.whir_proof, &proof.stacking_proof, &layouts)?;
+    Ok(layouts)
+}
+
+pub fn verify_outer_proof_shape<SC: StarkProtocolConfig>(
+    mvk: &MultiStarkVerifyingKey0<SC>,
+    proof: &OuterProofRef<'_, SC>,
+) -> Result<Vec<StackedLayout>, ProofShapeError> {
+    let trace_vdata = proof.trace_vdata;
+    let public_values = proof.public_values;
+    let gkr_proof = proof.gkr_proof;
+    let batch_constraint_proof = proof.batch_constraint_proof;
+    let stacking_proof = proof.stacking_proof;
+
     // TRACE HEIGHTS AND PUBLIC VALUES
     let num_airs = mvk.per_air.len();
     let l_skip = mvk.params.l_skip;
 
-    if proof.trace_vdata.len() != num_airs {
+    if trace_vdata.len() != num_airs {
         return ProofShapeError::invalid_vdata(ProofShapeVDataError::InvalidVDataLength {
-            len: proof.trace_vdata.len(),
+            len: trace_vdata.len(),
             num_airs,
         });
-    } else if proof.public_values.len() != num_airs {
+    } else if public_values.len() != num_airs {
         return ProofShapeError::invalid_vdata(ProofShapeVDataError::InvalidPublicValuesLength {
-            len: proof.public_values.len(),
+            len: public_values.len(),
             num_airs,
         });
     }
 
-    for (air_idx, (vk, vdata, pvs)) in
-        izip!(&mvk.per_air, &proof.trace_vdata, &proof.public_values).enumerate()
-    {
+    for (air_idx, (vk, vdata, pvs)) in izip!(&mvk.per_air, trace_vdata, public_values).enumerate() {
         if vdata.is_none() {
             if vk.is_required {
                 return ProofShapeError::invalid_vdata(ProofShapeVDataError::RequiredAirNoVData {
@@ -370,7 +395,7 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
     let per_trace = mvk
         .per_air
         .iter()
-        .zip(&proof.trace_vdata)
+        .zip(trace_vdata)
         .enumerate()
         .filter_map(|(air_idx, (vk, vdata))| vdata.as_ref().map(|vdata| (air_idx, vk, vdata)))
         .sorted_by_key(|(_, _, vdata)| Reverse(vdata.log_height))
@@ -388,19 +413,19 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
         l_skip + n_logup
     };
 
-    if proof.gkr_proof.claims_per_layer.len() != num_gkr_rounds {
+    if gkr_proof.claims_per_layer.len() != num_gkr_rounds {
         return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidClaimsPerLayer {
             expected: num_gkr_rounds,
-            actual: proof.gkr_proof.claims_per_layer.len(),
+            actual: gkr_proof.claims_per_layer.len(),
         });
-    } else if proof.gkr_proof.sumcheck_polys.len() != num_gkr_rounds.saturating_sub(1) {
+    } else if gkr_proof.sumcheck_polys.len() != num_gkr_rounds.saturating_sub(1) {
         return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidSumcheckPolys {
             expected: num_gkr_rounds.saturating_sub(1),
-            actual: proof.gkr_proof.sumcheck_polys.len(),
+            actual: gkr_proof.sumcheck_polys.len(),
         });
     }
 
-    for (i, poly) in proof.gkr_proof.sumcheck_polys.iter().enumerate() {
+    for (i, poly) in gkr_proof.sumcheck_polys.iter().enumerate() {
         if poly.len() != i + 1 {
             return ProofShapeError::invalid_gkr(GkrProofShapeError::InvalidSumcheckPolyEvals {
                 round: i + 1,
@@ -411,7 +436,7 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
     }
 
     // BATCH CONSTRAINTS PROOF SHAPE
-    let batch_proof = &proof.batch_constraint_proof;
+    let batch_proof = batch_constraint_proof;
 
     let n_max = per_trace[0].2.log_height.saturating_sub(l_skip);
 
@@ -516,7 +541,7 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
     }
 
     // STACKING PROOF SHAPE
-    let stacking_proof = &proof.stacking_proof;
+    let stacking_proof = stacking_proof;
 
     let s_0_deg = 2 * ((1 << l_skip) - 1);
     if stacking_proof.univariate_round_coeffs.len() != s_0_deg + 1 {
@@ -604,8 +629,16 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
         }
     }
 
+    Ok(layouts)
+}
+
+pub fn verify_whir_proof_shape<SC: StarkProtocolConfig>(
+    mvk: &MultiStarkVerifyingKey0<SC>,
+    whir_proof: &WhirProof<SC>,
+    stacking_proof: &StackingProof<SC>,
+    layouts: &[StackedLayout],
+) -> Result<(), ProofShapeError> {
     // WHIR PROOF SHAPE
-    let whir_proof = &proof.whir_proof;
 
     let log_stacked_height = mvk.params.log_stacked_height();
     let num_whir_rounds = mvk.params.num_whir_rounds();
@@ -787,5 +820,5 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
         }
     }
 
-    Ok(layouts)
+    Ok(())
 }

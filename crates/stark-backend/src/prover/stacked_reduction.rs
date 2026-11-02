@@ -27,13 +27,23 @@ use crate::{
 /// claims to opening claims of column polynomials of the stacked matrix.
 ///
 /// Returns the reduction proof and the random vector `u` of length `1 + n_stack`.
-pub trait StackedReductionProver<'a, PB: ProverBackend, PD> {
-    /// We only provide a view to the stacked `PcsData` per commitment because the WHIR prover will
-    /// still use the PLE evaluations of the stacked matrices later. The order of
-    /// `stacked_per_commit` is `common_main, preprocessed for trace_idx=0 (if any), cached_0 for
-    /// trace_idx=0, ..., preprocessed for trace_idx=1 (if any), ...`.
-    ///
-    /// The `lambda` is the batching randomness for the batch sumcheck.
+pub trait StackedReductionState<EF> {
+    /// Return the `s_0` batched polynomial from univariate round 0 of sumcheck.
+    fn batch_sumcheck_uni_round0_poly(&mut self) -> UnivariatePoly<EF>;
+
+    fn fold_ple_evals(&mut self, u_0: EF);
+
+    fn batch_sumcheck_poly_eval(&mut self, round: usize, u_prev: EF) -> [EF; 2];
+
+    fn fold_mle_evals(&mut self, round: usize, u_round: EF);
+
+    fn into_stacked_openings(self) -> Vec<Vec<EF>>;
+}
+
+pub trait StackedReductionProver<'a, PB: ProverBackend, PD>:
+    StackedReductionState<PB::Challenge>
+{
+    /// The lambda is sampled by the shared driver and passed to the backend state exactly once.
     fn new(
         device: &'a PD,
         stacked_per_commit: Vec<&'a PB::PcsData>,
@@ -41,21 +51,6 @@ pub trait StackedReductionProver<'a, PB: ProverBackend, PD> {
         r: &[PB::Challenge],
         lambda: PB::Challenge,
     ) -> Self;
-
-    /// Return the `s_0` batched polynomial from univariate round 0 of sumcheck.
-    fn batch_sumcheck_uni_round0_poly(&mut self) -> UnivariatePoly<PB::Challenge>;
-
-    fn fold_ple_evals(&mut self, u_0: PB::Challenge);
-
-    fn batch_sumcheck_poly_eval(
-        &mut self,
-        round: usize,
-        u_prev: PB::Challenge,
-    ) -> [PB::Challenge; 2];
-
-    fn fold_mle_evals(&mut self, round: usize, u_round: PB::Challenge);
-
-    fn into_stacked_openings(self) -> Vec<Vec<PB::Challenge>>;
 }
 
 /// Batch sumcheck to reduce trace openings, including rotations, to stacked matrix opening.
@@ -79,8 +74,22 @@ where
 {
     // Batching randomness
     let lambda = transcript.sample_ext();
+    let prover = SRP::new(device, stacked_per_commit, need_rot_per_commit, r, lambda);
+    prove_stacked_opening_reduction_from_state::<SC, _, _>(transcript, n_stack, prover)
+}
 
-    let mut prover = SRP::new(device, stacked_per_commit, need_rot_per_commit, r, lambda);
+/// Runs the shared stacking rounds from an already initialized state.
+/// The caller owns sampling and binding lambda before constructing the state.
+pub fn prove_stacked_opening_reduction_from_state<SC, TS, SRP>(
+    transcript: &mut TS,
+    n_stack: usize,
+    mut prover: SRP,
+) -> (StackingProof<SC>, Vec<SC::EF>)
+where
+    SC: StarkProtocolConfig,
+    TS: FiatShamirTranscript<SC>,
+    SRP: StackedReductionState<SC::EF>,
+{
     let s_0 = prover.batch_sumcheck_uni_round0_poly();
     for &coeff in s_0.coeffs() {
         transcript.observe_ext(coeff);
@@ -233,7 +242,13 @@ where
             eq_ub_per_trace,
         }
     }
+}
 
+impl<SC: StarkProtocolConfig> StackedReductionState<SC::EF> for StackedReductionCpu<'_, SC>
+where
+    SC::F: TwoAdicField,
+    SC::EF: TwoAdicField + ExtensionField<SC::F>,
+{
     fn batch_sumcheck_uni_round0_poly(&mut self) -> UnivariatePoly<SC::EF> {
         let l_skip = self.l_skip;
         let omega_skip = self.omega_skip;

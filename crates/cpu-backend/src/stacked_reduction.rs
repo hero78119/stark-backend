@@ -11,7 +11,7 @@ use openvm_stark_backend::{
     prover::{
         poly::evals_eq_hypercube,
         stacked_pcs::StackedSlice,
-        stacked_reduction::StackedReductionProver,
+        stacked_reduction::{StackedReductionProver, StackedReductionState},
         sumcheck::{batch_fold_mle_evals, sumcheck_round0_deg, sumcheck_round_poly_evals},
         ColMajorMatrix, ColMajorMatrixView, MatrixDimensions, ProverBackend,
     },
@@ -26,6 +26,12 @@ use p3_maybe_rayon::prelude::*;
 use crate::{
     backend::CpuBackend, device::CpuDevice, pcs_data::CpuStackedPcsData, two_adic::DftTwiddles,
 };
+
+#[derive(Clone, Copy)]
+pub struct StackedMatrixView<'a, F> {
+    pub layout: &'a openvm_stark_backend::prover::stacked_pcs::StackedLayout,
+    pub matrix: &'a ColMajorMatrix<F>,
+}
 
 /// Optimized PLE fold: precompute barycentric weights once, then evaluate each element
 /// as an inline dot product. Eliminates the 5.5M per-element Vec allocations in the
@@ -94,7 +100,7 @@ pub struct StackedReductionCpuNew<'a, SC: StarkProtocolConfig> {
     lambda_pows: Vec<SC::EF>,
     eq_const: SC::EF,
 
-    stacked_per_commit: Vec<&'a CpuStackedPcsData<SC::F, SC::Digest>>,
+    stacked_per_commit: Vec<StackedMatrixView<'a, SC::F>>,
     trace_views: Vec<TraceViewMeta>,
     ht_diff_idxs: Vec<usize>,
 
@@ -164,6 +170,29 @@ where
         r: &[SC::EF],
         lambda: SC::EF,
     ) -> Self {
+        let views = stacked_per_commit
+            .iter()
+            .map(|data| StackedMatrixView {
+                layout: &data.layout,
+                matrix: &data.matrix,
+            })
+            .collect();
+        Self::from_views(device, views, need_rot_per_commit, r, lambda)
+    }
+}
+
+impl<'a, SC: StarkProtocolConfig> StackedReductionCpuNew<'a, SC>
+where
+    SC::F: TwoAdicField,
+    SC::EF: TwoAdicField + ExtensionField<SC::F>,
+{
+    pub fn from_views(
+        device: &CpuDevice<SC>,
+        stacked_per_commit: Vec<StackedMatrixView<'a, SC::F>>,
+        need_rot_per_commit: Vec<Vec<bool>>,
+        r: &[SC::EF],
+        lambda: SC::EF,
+    ) -> Self {
         let l_skip = device.params().l_skip;
         let omega_skip = SC::F::two_adic_generator(l_skip);
 
@@ -224,7 +253,13 @@ where
             eq_ub_per_trace,
         }
     }
+}
 
+impl<SC: StarkProtocolConfig> StackedReductionState<SC::EF> for StackedReductionCpuNew<'_, SC>
+where
+    SC::F: TwoAdicField,
+    SC::EF: TwoAdicField + ExtensionField<SC::F>,
+{
     fn batch_sumcheck_uni_round0_poly(&mut self) -> UnivariatePoly<SC::EF> {
         let _span = tracing::info_span!("stacked_round0").entered();
         let l_skip = self.l_skip;

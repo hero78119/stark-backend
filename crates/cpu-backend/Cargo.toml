@@ -50,3 +50,4 @@ harness = false
 default = ["parallel", "metrics"]
 parallel = ["p3-maybe-rayon/parallel", "openvm-stark-backend/parallel"]
 metrics = ["openvm-stark-backend/metrics"]
+hiding-whir = ["openvm-stark-backend/hiding-whir"]

@@ -59,18 +59,37 @@ pub fn extension_to_hiding(value: OuterExtension) -> HidingExtension {
 
 /// Packs stacked column tables in P3's lexicographic order; missing columns are zero.
 pub fn pack_columns(columns: &[Vec<OuterBase>]) -> Result<Poly<HidingBase>, BridgeError> {
-    let first = columns.first().ok_or(BridgeError::EmptyColumns)?;
-    if first.is_empty() || !first.len().is_power_of_two() {
-        return Err(BridgeError::InvalidColumnShape);
-    }
-    if columns.iter().any(|column| column.len() != first.len()) {
-        return Err(BridgeError::InvalidColumnShape);
+    if columns.is_empty() {
+        return Err(BridgeError::EmptyColumns);
     }
     let padded_width = columns
         .len()
         .checked_next_power_of_two()
         .ok_or(BridgeError::WidthOverflow)?;
-    let mut table = vec![HidingBase::ZERO; first.len() * padded_width];
+    pack_columns_at_width(columns, padded_width)
+}
+
+/// Packs columns into a fixed selector width, zero-padding missing columns.
+pub fn pack_columns_at_width(
+    columns: &[Vec<OuterBase>],
+    padded_width: usize,
+) -> Result<Poly<HidingBase>, BridgeError> {
+    let first = columns.first().ok_or(BridgeError::EmptyColumns)?;
+    if first.is_empty()
+        || !first.len().is_power_of_two()
+        || !padded_width.is_power_of_two()
+        || padded_width < columns.len()
+    {
+        return Err(BridgeError::InvalidColumnShape);
+    }
+    if columns.iter().any(|column| column.len() != first.len()) {
+        return Err(BridgeError::InvalidColumnShape);
+    }
+    let table_len = first
+        .len()
+        .checked_mul(padded_width)
+        .ok_or(BridgeError::WidthOverflow)?;
+    let mut table = vec![HidingBase::ZERO; table_len];
     for (index, column) in columns.iter().enumerate() {
         let start = index * first.len();
         table[start..start + first.len()]
@@ -79,6 +98,18 @@ pub fn pack_columns(columns: &[Vec<OuterBase>]) -> Result<Poly<HidingBase>, Brid
             .for_each(|(out, &value)| *out = base_to_hiding(value));
     }
     Ok(Poly::new(table))
+}
+
+/// Adds leading zero selector coordinates, embedding the table in the first padded subcube.
+pub fn pad_opening_point(
+    point: &Point<HidingExtension>,
+    added_variables: usize,
+) -> Point<HidingExtension> {
+    Point::new(
+        std::iter::repeat_n(HidingExtension::ZERO, added_variables)
+            .chain(point.as_slice().iter().copied())
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Maps the OpenVM `μ` batch claim to P3's selector point and scaled opening value.

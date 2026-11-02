@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear as OuterBase, Poseidon2BabyBear};
 use p3_challenger_08::{CanObserve, CanSample, CanSampleUniformBits};
@@ -18,13 +18,20 @@ use crate::{
     config::{SystemParams, WhirProximityStrategy},
     hasher::Hasher,
     interaction::LogUpSecurityParameters,
+    keygen::{
+        types::{MultiStarkVerifyingKey, MultiStarkVerifyingKey0},
+        MultiStarkKeygenBuilder,
+    },
+    proof::{BatchConstraintProof, GkrProof, ProofV9, StackingProof},
     prover::poly::{eval_to_coeff_rs_message, evals_mobius_eq_hypercube, Mle},
+    test_utils::dummy_airs::fib_air::air::FibonacciAir,
     FiatShamirTranscript, StarkProtocolConfig,
 };
 
 use super::{
-    bridge, candidate_challenger, candidate_config, candidate_pcs, raw_candidate_challenger,
-    HidingBase, HidingCommitment, HidingExtension, HidingMerkleMmcs, HidingPcs, OuterExtension,
+    bridge, candidate_challenger, candidate_config, candidate_pcs, candidate_profile,
+    raw_candidate_challenger, HidingBase, HidingCommitment, HidingExtension, HidingMerkleMmcs,
+    HidingPcs, OuterExtension,
 };
 
 type OuterPerm = Poseidon2BabyBear<16>;
@@ -273,8 +280,81 @@ fn hiding_whir_column_packing_matches_mu_batch_for_widths_and_padding() {
 }
 
 #[test]
+fn hiding_whir_max_dimension_split_matches_original_packed_mle() {
+    let mu = outer_ext([7, 3, 2, 1]);
+    let columns = (0..5)
+        .map(|column| {
+            (0..8)
+                .map(|row| outer_base((column * 37 + row * 11 + 5) as u64))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let cube_point = vec![outer_ext([5, 2, 1, 3]); 3];
+    let expected = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            mu.exp_u64(index as u64)
+                * Mle::from_evaluations(column)
+                    .eval_at_point::<OuterExtension, OuterExtension>(&cube_point)
+        })
+        .fold(OuterExtension::ZERO, |sum, value| sum + value);
+    let full = bridge::pack_columns(&columns).unwrap();
+    let (full_point, full_claim) =
+        bridge::packed_opening(mu, columns.len(), &cube_point, expected).unwrap();
+    assert_eq!(
+        hiding_coefficients(full.eval_base(&full_point)),
+        hiding_coefficients(full_claim)
+    );
+
+    let first = bridge::pack_columns_at_width(&columns[..4], 4).unwrap();
+    let second = bridge::pack_columns_at_width(&columns[4..], 4).unwrap();
+    let half_point = Point::new(full_point.as_slice()[1..].to_vec());
+    let theta0 = full_point[0];
+    let combined = (HidingExtension::ONE - theta0) * first.eval_base(&half_point)
+        + theta0 * second.eval_base(&half_point);
+    assert_eq!(
+        hiding_coefficients(combined),
+        hiding_coefficients(full_claim),
+        "two 26-variable halves must equal the original 27-variable opening"
+    );
+
+    let padded = bridge::pack_columns_at_width(&columns, 16).unwrap();
+    let padded_point = bridge::pad_opening_point(&full_point, 1);
+    assert_eq!(
+        hiding_coefficients(padded.eval_base(&padded_point)),
+        hiding_coefficients(full_claim),
+        "a leading zero selector coordinate must preserve the original opening"
+    );
+}
+
+#[test]
+fn hiding_whir_profiles_are_fixed_and_split_only_at_dimension_27() {
+    assert_eq!(candidate_profile(20).unwrap().num_variables, 20);
+    assert_eq!(candidate_profile(21).unwrap().num_variables, 22);
+    assert_eq!(candidate_profile(22).unwrap().num_variables, 22);
+    assert_eq!(candidate_profile(26).unwrap().num_commitments, 1);
+    assert_eq!(
+        candidate_profile(27).unwrap(),
+        super::CandidateProfile {
+            num_variables: 26,
+            num_commitments: 2,
+            split_selector: true,
+        }
+    );
+    assert!(candidate_profile(28).is_err());
+}
+
+#[test]
 fn hiding_whir_pinned_candidate_config_fits_and_reports() {
     assert!(candidate_config(16).is_err());
+    assert!(candidate_config(18).is_err());
+    assert!(candidate_config(20).is_ok());
+    let candidate_22 = candidate_config(22);
+    assert!(candidate_22.is_ok(), "{candidate_22:?}");
+    let candidate_26 = candidate_config(26);
+    assert!(candidate_26.is_ok(), "{candidate_26:?}");
+    assert!(candidate_config(27).is_err());
     assert!(candidate_config(24).is_err());
     assert!(candidate_config(usize::MAX).is_err());
     let accepted = (0..=HidingBase::TWO_ADICITY as usize - 1)
@@ -683,4 +763,70 @@ fn run_outer_transcript_prefix(transcript: &mut super::transcript::V9Transcript)
     FiatShamirTranscript::<TestConfig>::observe_ext(transcript, outer_ext([31, 37, 41, 43]));
     let _ = FiatShamirTranscript::<TestConfig>::sample_ext(transcript);
     let _ = FiatShamirTranscript::<TestConfig>::sample_bits(transcript, 7);
+}
+
+fn proof_with_absent_traces(count: usize) -> ProofV9<TestConfig> {
+    ProofV9 {
+        common_main_commits: vec![],
+        trace_vdata: vec![None; count],
+        public_values: vec![vec![]; count],
+        gkr_proof: GkrProof {
+            logup_pow_witness: OuterBase::ZERO,
+            q0_claim: OuterExtension::ZERO,
+            claims_per_layer: vec![],
+            sumcheck_polys: vec![],
+        },
+        batch_constraint_proof: BatchConstraintProof {
+            numerator_term_per_air: vec![],
+            denominator_term_per_air: vec![],
+            univariate_round_coeffs: vec![],
+            sumcheck_round_polys: vec![],
+            column_openings: vec![],
+        },
+        stacking_proof: StackingProof {
+            univariate_round_coeffs: vec![],
+            sumcheck_round_polys: vec![],
+            stacking_openings: vec![],
+        },
+        mu_pow_witness: OuterBase::ZERO,
+        hiding_whir_proofs: vec![],
+    }
+}
+
+fn assert_rejects_empty_traces(mvk: &MultiStarkVerifyingKey<TestConfig>, trace_count: usize) {
+    let mut transcript = super::transcript::V9Transcript::with_events(raw_candidate_challenger());
+    assert!(matches!(
+        crate::verifier::hiding_whir::verify_v9(
+            test_config(),
+            mvk,
+            &proof_with_absent_traces(trace_count),
+            [OuterBase::ZERO; 8],
+            &mut transcript,
+        ),
+        Err(
+            crate::verifier::hiding_whir::HidingWhirVerifierError::Outer(
+                crate::verifier::VerifierError::EmptyTraces
+            )
+        )
+    ));
+    assert!(transcript.events().is_empty());
+}
+
+#[test]
+fn hiding_whirl_v9_rejects_empty_trace_before_shape_without_transcript_consumption() {
+    let empty_vk = MultiStarkVerifyingKey {
+        inner: MultiStarkVerifyingKey0 {
+            params: test_config().params().clone(),
+            per_air: vec![],
+            trace_height_constraints: vec![],
+        },
+        pre_hash: [OuterBase::ZERO; 8],
+    };
+    assert_rejects_empty_traces(&empty_vk, 0);
+
+    let mut keygen = MultiStarkKeygenBuilder::new((*test_config()).clone());
+    keygen.add_air(Arc::new(FibonacciAir));
+    let optional_vk = keygen.generate_pk().unwrap().get_vk();
+    assert!(optional_vk.inner.per_air.iter().all(|air| !air.is_required));
+    assert_rejects_empty_traces(&optional_vk, optional_vk.inner.per_air.len());
 }
