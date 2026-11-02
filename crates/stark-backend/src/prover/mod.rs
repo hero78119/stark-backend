@@ -166,6 +166,86 @@ impl<SC: StarkProtocolConfig, PB: ProverBackend, PD, TS> Coordinator<SC, PB, PD,
     }
 }
 
+impl<SC, PB, PD, TS> Coordinator<SC, PB, PD, TS>
+where
+    SC: StarkProtocolConfig,
+    PB: ProverBackend<Val = SC::F, Challenge = SC::EF, Commitment = SC::Digest>,
+    PD: ProverDevice<PB, TS>,
+    PD::Artifacts: Into<PD::OpeningPoints>,
+    PD::PartialProof: Into<(GkrProof<SC>, BatchConstraintProof<SC>)>,
+    PD::OpeningProof: Into<(StackingProof<SC>, WhirProof<SC>)>,
+    TS: FiatShamirTranscript<SC>,
+{
+    /// Prove with observational phase events; this does not alter the transcript or proof.
+    pub fn prove_with_stage_observer(
+        &mut self,
+        mpk: &DeviceMultiStarkProvingKey<PB>,
+        unsorted_ctx: ProvingContext<PB>,
+        on_stage: impl FnMut(&'static str),
+    ) -> Result<Proof<SC>, <PD as ProverDevice<PB, TS>>::Error> {
+        let stage = std::cell::RefCell::new(on_stage);
+        let transcript = &mut self.transcript;
+        let device = &self.device;
+        let HostProof {
+            common_main_commit,
+            trace_vdata,
+            public_values,
+            constraints_proof,
+            opening_proof,
+        } = prove_with_pcs::<
+            SC,
+            PB,
+            TS,
+            PB::Commitment,
+            PB::PcsData,
+            PD::PartialProof,
+            PD::Artifacts,
+            PD::OpeningProof,
+            <PD as ProverDevice<PB, TS>>::Error,
+        >(
+            transcript,
+            mpk,
+            mpk.vk_pre_hash.clone(),
+            unsorted_ctx,
+            |_, traces| {
+                (stage.borrow_mut())("pcs_commit_started");
+                let result = device.commit(traces).map_err(Into::into);
+                (stage.borrow_mut())("pcs_commit_complete");
+                result
+            },
+            |transcript, commitment| transcript.observe_commit(commitment.clone()),
+            |transcript, mpk, ctx, pcs_data| {
+                (stage.borrow_mut())("gkr_logup_started");
+                let result = device
+                    .prove_rap_constraints(transcript, mpk, ctx, pcs_data)
+                    .map_err(Into::into);
+                (stage.borrow_mut())("gkr_logup_complete");
+                result
+            },
+            |transcript, mpk, ctx, pcs_data, artifacts| {
+                (stage.borrow_mut())("pcs_open_started");
+                let result = device
+                    .prove_openings(transcript, mpk, ctx, pcs_data, artifacts.into())
+                    .map_err(Into::into);
+                (stage.borrow_mut())("pcs_open_complete");
+                result
+            },
+        )?;
+
+        let (gkr_proof, batch_constraint_proof) = constraints_proof.into();
+        let (stacking_proof, whir_proof) = opening_proof.into();
+        Ok(Proof::<SC> {
+            public_values,
+            trace_vdata,
+            common_main_commit,
+            gkr_proof,
+            batch_constraint_proof,
+            stacking_proof,
+            whir_proof,
+        })
+    }
+}
+
 impl<SC, PB, PD, TS> Prover for Coordinator<SC, PB, PD, TS>
 where
     SC: StarkProtocolConfig,
@@ -205,53 +285,6 @@ where
         mpk: &'a DeviceMultiStarkProvingKey<PB>,
         unsorted_ctx: ProvingContext<PB>,
     ) -> Result<Self::Proof, Self::Error> {
-        let transcript = &mut self.transcript;
-        let HostProof {
-            common_main_commit,
-            trace_vdata,
-            public_values,
-            constraints_proof,
-            opening_proof,
-        } = prove_with_pcs::<
-            SC,
-            PB,
-            TS,
-            PB::Commitment,
-            PB::PcsData,
-            PD::PartialProof,
-            PD::Artifacts,
-            PD::OpeningProof,
-            Self::Error,
-        >(
-            transcript,
-            mpk,
-            mpk.vk_pre_hash.clone(),
-            unsorted_ctx,
-            |_, traces| self.device.commit(traces).map_err(Into::into),
-            |transcript, commitment| transcript.observe_commit(commitment.clone()),
-            |transcript, mpk, ctx, pcs_data| {
-                self.device
-                    .prove_rap_constraints(transcript, mpk, ctx, pcs_data)
-                    .map_err(Into::into)
-            },
-            |transcript, mpk, ctx, pcs_data, artifacts| {
-                self.device
-                    .prove_openings(transcript, mpk, ctx, pcs_data, artifacts.into())
-                    .map_err(Into::into)
-            },
-        )?;
-
-        let (gkr_proof, batch_constraint_proof) = constraints_proof.into();
-        let (stacking_proof, whir_proof) = opening_proof.into();
-
-        Ok(Proof::<SC> {
-            public_values,
-            trace_vdata,
-            common_main_commit,
-            gkr_proof,
-            batch_constraint_proof,
-            stacking_proof,
-            whir_proof,
-        })
+        self.prove_with_stage_observer(mpk, unsorted_ctx, |_| {})
     }
 }

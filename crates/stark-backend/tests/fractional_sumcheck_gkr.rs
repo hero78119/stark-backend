@@ -8,13 +8,60 @@
 
 use openvm_stark_backend::{
     proof::{GkrLayerClaims, GkrProof},
-    prover::fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
+    prover::fractional_sumcheck_gkr::{
+        fractional_sumcheck, fractional_sumcheck_owned_with_stage_observer, Frac,
+    },
     verifier::fractional_sumcheck_gkr::{verify_gkr, GkrVerificationError},
 };
 use openvm_stark_sdk::{config::baby_bear_poseidon2::*, utils::setup_tracing};
 use p3_field::PrimeCharacteristicRing;
 
 type SC = BabyBearPoseidon2Config;
+
+#[test]
+fn owned_in_place_fractional_sumcheck_matches_reference() -> eyre::Result<()> {
+    let mut values = (0..16)
+        .map(|value| EF::from_usize(value))
+        .collect::<Vec<_>>();
+    let sum = values.iter().copied().sum::<EF>();
+    values[15] = -sum + values[15];
+    let fractions = values
+        .into_iter()
+        .map(|p| Frac { p, q: EF::ONE })
+        .collect::<Vec<_>>();
+    let mut owned = Vec::with_capacity(2 * fractions.len());
+    owned.extend(fractions.iter().copied());
+
+    let mut reference_transcript = default_duplex_sponge();
+    let (reference, reference_xi) =
+        fractional_sumcheck::<SC, _>(&mut reference_transcript, &fractions, true)?;
+    let mut optimized_transcript = default_duplex_sponge();
+    let (optimized, optimized_xi) = fractional_sumcheck_owned_with_stage_observer::<SC, _, _>(
+        &mut optimized_transcript,
+        owned,
+        true,
+        |_| {},
+    )?;
+
+    assert_eq!(reference.fractional_sum, optimized.fractional_sum);
+    assert_eq!(
+        reference.claims_per_layer.len(),
+        optimized.claims_per_layer.len()
+    );
+    for (left, right) in reference
+        .claims_per_layer
+        .iter()
+        .zip(&optimized.claims_per_layer)
+    {
+        assert_eq!(left.p_xi_0, right.p_xi_0);
+        assert_eq!(left.q_xi_0, right.q_xi_0);
+        assert_eq!(left.p_xi_1, right.p_xi_1);
+        assert_eq!(left.q_xi_1, right.q_xi_1);
+    }
+    assert_eq!(reference.sumcheck_polys, optimized.sumcheck_polys);
+    assert_eq!(reference_xi, optimized_xi);
+    Ok(())
+}
 
 #[test]
 fn test_multiple_rounds_shape() {

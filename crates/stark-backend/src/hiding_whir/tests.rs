@@ -307,16 +307,36 @@ fn hiding_whir_max_dimension_split_matches_original_packed_mle() {
         hiding_coefficients(full_claim)
     );
 
-    let first = bridge::pack_columns_at_width(&columns[..4], 4).unwrap();
-    let second = bridge::pack_columns_at_width(&columns[4..], 4).unwrap();
-    let half_point = Point::new(full_point.as_slice()[1..].to_vec());
-    let theta0 = full_point[0];
-    let combined = (HidingExtension::ONE - theta0) * first.eval_base(&half_point)
-        + theta0 * second.eval_base(&half_point);
+    let selector = &full_point.as_slice()[..2];
+    let tail_point = Point::new(full_point.as_slice()[2..].to_vec());
+    let combined = (0..4)
+        .map(|piece| {
+            let start = piece * 2;
+            let packed = if start < columns.len() {
+                bridge::pack_columns_at_width(&columns[start..(start + 2).min(columns.len())], 2)
+                    .unwrap()
+            } else {
+                bridge::pack_zero_columns_at_width(8, 2).unwrap()
+            };
+            let selector_weight = selector.iter().enumerate().fold(
+                HidingExtension::ONE,
+                |weight, (variable, value)| {
+                    let bit = (piece >> (1 - variable)) & 1;
+                    weight
+                        * if bit == 0 {
+                            HidingExtension::ONE - *value
+                        } else {
+                            *value
+                        }
+                },
+            );
+            selector_weight * packed.eval_base(&tail_point)
+        })
+        .sum::<HidingExtension>();
     assert_eq!(
         hiding_coefficients(combined),
         hiding_coefficients(full_claim),
-        "two 26-variable halves must equal the original 27-variable opening"
+        "four 25-variable quarters, including a zero-padded empty quarter, must equal the original 27-variable opening"
     );
 
     let padded = bridge::pack_columns_at_width(&columns, 16).unwrap();
@@ -329,20 +349,76 @@ fn hiding_whir_max_dimension_split_matches_original_packed_mle() {
 }
 
 #[test]
-fn hiding_whir_profiles_are_fixed_and_split_only_at_dimension_27() {
+fn hiding_whir_fused_column_conversion_matches_the_previous_adapter() {
+    let columns = (0..5)
+        .map(|column| {
+            (0..8)
+                .map(|row| outer_base((column * 37 + row * 11 + 5) as u64))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let values = columns.iter().flatten().copied().collect::<Vec<_>>();
+    let converted = columns
+        .iter()
+        .map(|column| eval_to_coeff_rs_message(1, column))
+        .collect::<Vec<_>>();
+
+    for (start, width) in [(0, 4), (4, 4), (0, 8)] {
+        let previous =
+            bridge::pack_columns_at_width(&converted[start..(start + width).min(5)], width)
+                .unwrap();
+        let fused = bridge::pack_eval_columns_at_width(&values, 8, 5, start, 1, width).unwrap();
+        assert_eq!(
+            previous.as_slice(),
+            fused.as_slice(),
+            "fused conversion changed the packed witness for columns {start}..{}",
+            start + width
+        );
+    }
+
+    let empty_piece = bridge::pack_eval_columns_at_width(&values, 8, 5, 6, 1, 2).unwrap();
+    assert!(empty_piece
+        .as_slice()
+        .iter()
+        .all(|value| *value == HidingBase::ZERO));
+}
+
+#[test]
+fn hiding_whir_profiles_split_to_keep_the_pcs_dimension_bounded() {
     assert_eq!(candidate_profile(20).unwrap().num_variables, 20);
     assert_eq!(candidate_profile(21).unwrap().num_variables, 22);
     assert_eq!(candidate_profile(22).unwrap().num_variables, 22);
-    assert_eq!(candidate_profile(26).unwrap().num_commitments, 1);
+    assert_eq!(candidate_profile(25).unwrap().num_commitments, 1);
+    assert_eq!(
+        candidate_profile(26).unwrap(),
+        super::CandidateProfile {
+            num_variables: 25,
+            num_commitments: 2,
+            selector_variables: 1,
+        }
+    );
     assert_eq!(
         candidate_profile(27).unwrap(),
         super::CandidateProfile {
-            num_variables: 26,
-            num_commitments: 2,
-            split_selector: true,
+            num_variables: 25,
+            num_commitments: 4,
+            selector_variables: 2,
         }
     );
     assert!(candidate_profile(28).is_err());
+}
+
+#[test]
+fn hiding_whir_selector_split_zero_pads_missing_commitment_chunks() {
+    let columns = vec![vec![OuterBase::ZERO]; 5];
+    let chunks = super::split_columns_for_commitments(&columns, 2, 4).unwrap();
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|chunk| chunk.map(|slice| slice.len()))
+            .collect::<Vec<_>>(),
+        [Some(2), Some(2), Some(1), None]
+    );
 }
 
 #[test]
@@ -352,6 +428,10 @@ fn hiding_whir_pinned_candidate_config_fits_and_reports() {
     assert!(candidate_config(20).is_ok());
     let candidate_22 = candidate_config(22);
     assert!(candidate_22.is_ok(), "{candidate_22:?}");
+    candidate_config(25)
+        .expect("25-variable split PCS profile must fit all randomized-oracle budgets")
+        .validate_initial_claims(1)
+        .unwrap();
     let candidate_26 = candidate_config(26);
     assert!(candidate_26.is_ok(), "{candidate_26:?}");
     assert!(candidate_config(27).is_err());

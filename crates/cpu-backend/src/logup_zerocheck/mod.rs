@@ -27,7 +27,7 @@ use openvm_stark_backend::{
     proof::{column_openings_by_rot, BatchConstraintProof, GkrProof},
     prover::{
         error::LogupZerocheckError,
-        fractional_sumcheck_gkr::{fractional_sumcheck, Frac},
+        fractional_sumcheck_gkr::{fractional_sumcheck_owned_with_stage_observer, Frac},
         poly::{eq_sharp_uni_poly, evals_eq_hypercubes},
         stacked_pcs::StackedLayout,
         sumcheck::sumcheck_round0_deg,
@@ -1357,6 +1357,23 @@ where
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
     CpuBackend<SC>: ProverBackend<Val = SC::F, Matrix = RowMajorMatrix<SC::F>>,
 {
+    prove_zerocheck_and_logup_with_stage_observer(transcript, mpk, ctx, |_| {})
+}
+
+#[instrument(level = "info", skip_all)]
+pub fn prove_zerocheck_and_logup_with_stage_observer<SC: StarkProtocolConfig, TS, O>(
+    transcript: &mut TS,
+    mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
+    ctx: &ProvingContext<CpuBackend<SC>>,
+    on_stage: O,
+) -> Result<(GkrProof<SC>, BatchConstraintProof<SC>, Vec<SC::EF>), LogupZerocheckError>
+where
+    TS: FiatShamirTranscript<SC>,
+    SC::F: TwoAdicField,
+    SC::EF: TwoAdicField + ExtensionField<SC::F>,
+    CpuBackend<SC>: ProverBackend<Val = SC::F, Matrix = RowMajorMatrix<SC::F>>,
+    O: Fn(&'static str),
+{
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
     let num_traces = ctx.per_trace.len();
@@ -1394,6 +1411,7 @@ where
         alpha_logup,
         beta_logup,
     );
+    on_stage("gkr_logup_state_ready");
 
     // GKR: compute logup input layer using row-major access
     let has_interactions = !prover.interactions_layout.sorted_cols.is_empty();
@@ -1419,7 +1437,11 @@ where
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        let mut evals = vec![Frac::default(); 1 << (l_skip + n_logup)];
+        let input_len = 1 << (l_skip + n_logup);
+        on_stage("gkr_segment_tree_buffer_allocation_started");
+        let mut evals = Vec::with_capacity(2 * input_len);
+        on_stage("gkr_segment_tree_buffer_allocated");
+        evals.resize(input_len, Frac::default());
         for (trace_idx, interaction_idx, s) in
             prover.interactions_layout.sorted_cols.iter().copied()
         {
@@ -1446,9 +1468,15 @@ where
         evals.par_iter_mut().for_each(|frac| frac.q += alpha_logup);
         evals
     };
+    on_stage("gkr_input_layer_ready");
 
-    let (frac_sum_proof, mut xi) =
-        fractional_sumcheck::<SC, _>(transcript, &gkr_input_evals, true)?;
+    let (frac_sum_proof, mut xi) = fractional_sumcheck_owned_with_stage_observer::<SC, _, _>(
+        transcript,
+        gkr_input_evals,
+        true,
+        |stage| on_stage(stage),
+    )?;
+    on_stage("gkr_fractional_sumcheck_complete");
 
     let n_global = max(n_max, n_logup);
     debug!(%n_global);
@@ -1465,6 +1493,7 @@ where
     debug!(%lambda);
 
     let sp_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda);
+    on_stage("gkr_round0_polys_ready");
     let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_degree);
     let s_deg = constraint_degree + 1;
     let s_0_deg = sumcheck_round0_deg(l_skip, s_deg);
@@ -1493,6 +1522,7 @@ where
         }
         dft.idft_batch(s_evals)
     };
+    on_stage("gkr_round0_logup_dft_complete");
 
     let skip_domain_size = SC::F::from_usize(1 << l_skip);
     let (numerator_term_per_air, denominator_term_per_air): (Vec<_>, Vec<_>) = (0..num_traces)
@@ -1638,6 +1668,7 @@ where
 
         prover.fold_mle_evals(round, r_round);
     }
+    on_stage("gkr_mle_rounds_complete");
     drop(_mle_rounds_span);
     assert_eq!(r.len(), n_max + 1);
 

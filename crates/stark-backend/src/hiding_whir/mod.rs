@@ -10,10 +10,13 @@ use p3_baby_bear_08::{
 use p3_challenger_08::DuplexChallenger;
 use p3_commit_08::MultilinearPcs;
 use p3_dft_08::Radix2DFTSmallBatch;
+#[cfg(target_arch = "wasm32")]
+use p3_field_08::PackedValue;
 use p3_field_08::{
     extension::BinomialExtensionField, Field, PrimeCharacteristicRing, TwoAdicField,
 };
 use p3_merkle_tree_08::MerkleTreeMmcs;
+use p3_multilinear_util_08::poly::Poly;
 use p3_symmetric_08::{PaddingFreeSponge, TruncatedPermutation};
 use p3_whir_08::{
     FoldingFactor, HidingWhirPcs, HidingWhirProverData, ProtocolParameters, SecurityAssumption,
@@ -33,6 +36,8 @@ pub type HidingPoseidon24 = Poseidon2BabyBear<24>;
 pub type HidingMerkleHash = PaddingFreeSponge<HidingPoseidon24, 24, 16, 8>;
 pub type HidingMerkleCompress = TruncatedPermutation<HidingPoseidon16, 2, 8, 16>;
 pub type HidingPackedBase = <HidingBase as Field>::Packing;
+type HidingPackedExtension =
+    <HidingExtension as p3_field_08::ExtensionField<HidingBase>>::ExtensionPacking;
 pub type HidingMerkleMmcs = MerkleTreeMmcs<
     HidingPackedBase,
     HidingPackedBase,
@@ -57,6 +62,20 @@ pub type HidingPcs = HidingWhirPcs<
 pub type HidingProverData = HidingWhirProverData<HidingBase, HidingExtension, HidingMerkleMmcs>;
 pub type HidingProof = ZkWhirProof<HidingBase, HidingExtension, HidingMerkleMmcs>;
 
+const _: () = {
+    assert!(core::mem::size_of::<HidingExtension>() == 32);
+    assert!(
+        core::mem::size_of::<HidingPackedExtension>()
+            == core::mem::size_of::<HidingPackedBase>() * 8
+    );
+};
+
+#[cfg(target_arch = "wasm32")]
+const _: () = {
+    assert!(HidingPackedBase::WIDTH == 1);
+    assert!(core::mem::size_of::<HidingPackedExtension>() == 32);
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum CandidatePcsError {
     #[error(transparent)]
@@ -79,7 +98,7 @@ pub enum CandidatePcsError {
 pub struct CandidateProfile {
     pub num_variables: usize,
     pub num_commitments: usize,
-    pub split_selector: bool,
+    pub selector_variables: usize,
 }
 
 pub fn candidate_profile(
@@ -92,11 +111,12 @@ pub fn candidate_profile(
             max_variables,
         });
     }
-    let (num_variables, num_commitments, split_selector) = match actual_variables {
-        0..=20 => (20, 1, false),
-        21..=22 => (22, 1, false),
-        23..=26 => (26, 1, false),
-        27 => (26, 2, true),
+    let (num_variables, num_commitments, selector_variables) = match actual_variables {
+        0..=20 => (20, 1, 0),
+        21..=22 => (22, 1, 0),
+        23..=25 => (26, 1, 0),
+        26 => (25, 2, 1),
+        27 => (25, 4, 2),
         _ => {
             return Err(CandidateConfigError::UnsupportedProfileDimension(
                 actual_variables,
@@ -106,7 +126,7 @@ pub fn candidate_profile(
     Ok(CandidateProfile {
         num_variables,
         num_commitments,
-        split_selector,
+        selector_variables,
     })
 }
 
@@ -118,7 +138,7 @@ pub enum CandidateConfigError {
         num_variables: usize,
         max_variables: usize,
     },
-    #[error("{0} variables are not in the fixed ProofCard candidate profiles (20, 22, 26)")]
+    #[error("{0} variables are not in the fixed ProofCard candidate profiles (20, 22, 25, 26)")]
     UnsupportedProfileDimension(usize),
     #[error(transparent)]
     Whir(#[from] p3_whir_08::ZkConfigError),
@@ -135,6 +155,11 @@ pub fn candidate_config(num_variables: usize) -> Result<HidingConfig, CandidateC
     let (folding_factor, round_log_inv_rates, security_level) = match num_variables {
         20 => (FoldingFactor::ConstantFromSecondRound(8, 6), vec![4], 128),
         22 => (FoldingFactor::ConstantFromSecondRound(8, 8), vec![4], 128),
+        25 => (
+            FoldingFactor::ConstantFromSecondRound(8, 6),
+            vec![4, 5],
+            132,
+        ),
         26 => (
             FoldingFactor::ConstantFromSecondRound(8, 6),
             vec![4, 4],
@@ -206,7 +231,10 @@ pub fn candidate_commit(
     challenger: &mut HidingChallenger,
 ) -> Result<(Vec<HidingCommitment>, Vec<HidingProverData>), CandidatePcsError> {
     if pcs.num_vars() != profile.num_variables
-        || profile.num_commitments != if profile.split_selector { 2 } else { 1 }
+        || profile.num_commitments
+            != 1usize
+                .checked_shl(profile.selector_variables as u32)
+                .unwrap_or(0)
     {
         return Err(CandidatePcsError::CommitmentCountMismatch);
     }
@@ -229,11 +257,8 @@ pub fn candidate_commit(
         .checked_shl(selector_variables as u32)
         .ok_or(bridge::BridgeError::WidthOverflow)?;
 
-    let chunks: Vec<&[Vec<OuterBase>]> = if profile.split_selector {
-        if profile.num_variables != 26 || columns.len() <= target_width {
-            return Err(CandidatePcsError::CommitmentCountMismatch);
-        }
-        vec![&columns[..target_width], &columns[target_width..]]
+    let chunks: Vec<Option<&[Vec<OuterBase>]>> = if profile.selector_variables != 0 {
+        split_columns_for_commitments(columns, target_width, profile.num_commitments)?
     } else {
         if columns.len() > target_width {
             return Err(CandidatePcsError::VariableCountMismatch {
@@ -241,18 +266,69 @@ pub fn candidate_commit(
                 actual: row_variables + columns.len().next_power_of_two().trailing_zeros() as usize,
             });
         }
-        vec![columns]
+        vec![Some(columns)]
     };
 
     let mut commitments = Vec::with_capacity(chunks.len());
     let mut prover_data = Vec::with_capacity(chunks.len());
     for chunk in chunks {
-        let witness = bridge::pack_columns_at_width(chunk, target_width)?;
-        let (commitment, data) = MultilinearPcs::commit(pcs, witness, challenger)?;
+        let witness = match chunk {
+            Some(chunk) => bridge::pack_columns_at_width(chunk, target_width)?,
+            None => bridge::pack_zero_columns_at_width(column_height, target_width)?,
+        };
+        let (commitment, data) = candidate_commit_witness(pcs, witness, profile, challenger)?;
         commitments.push(commitment);
         prover_data.push(data);
     }
     Ok((commitments, prover_data))
+}
+
+fn split_columns_for_commitments(
+    columns: &[Vec<OuterBase>],
+    target_width: usize,
+    num_commitments: usize,
+) -> Result<Vec<Option<&[Vec<OuterBase>]>>, CandidatePcsError> {
+    let max_width = target_width
+        .checked_mul(num_commitments)
+        .ok_or(CandidatePcsError::CommitmentCountMismatch)?;
+    if target_width == 0
+        || !target_width.is_power_of_two()
+        || columns.len() <= target_width
+        || columns.len() > max_width
+    {
+        return Err(CandidatePcsError::CommitmentCountMismatch);
+    }
+    Ok((0..num_commitments)
+        .map(|piece| {
+            let start = piece * target_width;
+            let end = (start + target_width).min(columns.len());
+            (start < end).then(|| &columns[start..end])
+        })
+        .collect())
+}
+
+/// Commits one already packed witness under the fixed candidate profile.
+pub fn candidate_commit_witness(
+    pcs: &HidingPcs,
+    witness: Poly<HidingBase>,
+    profile: CandidateProfile,
+    challenger: &mut HidingChallenger,
+) -> Result<(HidingCommitment, HidingProverData), CandidatePcsError> {
+    let pcs_variables = pcs.num_vars();
+    let actual = witness.num_variables();
+    if pcs_variables != profile.num_variables {
+        return Err(CandidatePcsError::VariableCountMismatch {
+            expected: profile.num_variables,
+            actual: pcs_variables,
+        });
+    }
+    if actual != profile.num_variables {
+        return Err(CandidatePcsError::VariableCountMismatch {
+            expected: profile.num_variables,
+            actual,
+        });
+    }
+    MultilinearPcs::commit(pcs, witness, challenger).map_err(CandidatePcsError::from)
 }
 
 pub fn candidate_observe_commitment(
@@ -274,6 +350,32 @@ pub fn candidate_open(
     expected_value: OuterExtension,
     challenger: &mut HidingChallenger,
 ) -> Result<Vec<HidingProof>, CandidatePcsError> {
+    candidate_open_with_stage_observer(
+        pcs,
+        prover_data,
+        commitments,
+        profile,
+        mu,
+        width,
+        cube_point_little_endian,
+        expected_value,
+        challenger,
+        |_| {},
+    )
+}
+
+pub fn candidate_open_with_stage_observer<O: Fn(&'static str)>(
+    pcs: &HidingPcs,
+    prover_data: Vec<HidingProverData>,
+    commitments: &[HidingCommitment],
+    profile: CandidateProfile,
+    mu: OuterExtension,
+    width: usize,
+    cube_point_little_endian: &[OuterExtension],
+    expected_value: OuterExtension,
+    challenger: &mut HidingChallenger,
+    on_stage: O,
+) -> Result<Vec<HidingProof>, CandidatePcsError> {
     let (full_point, expected_packed_claim) =
         bridge::packed_opening(mu, width, cube_point_little_endian, expected_value)?;
     if prover_data.len() != profile.num_commitments
@@ -284,9 +386,35 @@ pub fn candidate_open(
     }
     let points = profile_opening_points(&full_point, profile)?;
     let mut proofs = Vec::with_capacity(points.len());
-    for ((data, commitment), point) in prover_data.into_iter().zip(commitments).zip(points) {
+    for (index, ((data, commitment), point)) in prover_data
+        .into_iter()
+        .zip(commitments)
+        .zip(points)
+        .enumerate()
+    {
         candidate_observe_commitment(pcs, commitment, challenger);
-        let proof = MultilinearPcs::open(pcs, data, vec![point], challenger)?;
+        let (started, complete) = match index {
+            0 => (
+                "hiding_whir_open_piece_0_started",
+                "hiding_whir_open_piece_0_complete",
+            ),
+            1 => (
+                "hiding_whir_open_piece_1_started",
+                "hiding_whir_open_piece_1_complete",
+            ),
+            2 => (
+                "hiding_whir_open_piece_2_started",
+                "hiding_whir_open_piece_2_complete",
+            ),
+            3 => (
+                "hiding_whir_open_piece_3_started",
+                "hiding_whir_open_piece_3_complete",
+            ),
+            _ => return Err(CandidatePcsError::CommitmentCountMismatch),
+        };
+        on_stage(started);
+        let proof = pcs.open_with_stage_observer(data, vec![point], challenger, &on_stage)?;
+        on_stage(complete);
         proofs.push(proof);
     }
     let combined_claim = combine_opening_claims(&full_point, profile, &proofs)?;
@@ -300,18 +428,18 @@ fn profile_opening_points(
     full_point: &p3_multilinear_util_08::point::Point<HidingExtension>,
     profile: CandidateProfile,
 ) -> Result<Vec<p3_multilinear_util_08::point::Point<HidingExtension>>, CandidatePcsError> {
-    if profile.split_selector {
-        if full_point.num_variables() != profile.num_variables + 1 {
+    if profile.selector_variables != 0 {
+        if full_point.num_variables() != profile.num_variables + profile.selector_variables {
             return Err(CandidatePcsError::VariableCountMismatch {
-                expected: profile.num_variables + 1,
+                expected: profile.num_variables + profile.selector_variables,
                 actual: full_point.num_variables(),
             });
         }
         Ok(vec![
             p3_multilinear_util_08::point::Point::new(
-                full_point.as_slice()[1..].to_vec(),
+                full_point.as_slice()[profile.selector_variables..].to_vec(),
             );
-            2
+            profile.num_commitments
         ])
     } else {
         let added = profile
@@ -334,12 +462,27 @@ fn combine_opening_claims(
     {
         return Err(CandidatePcsError::CommitmentCountMismatch);
     }
-    if profile.split_selector {
-        let selector = *full_point
-            .as_slice()
-            .first()
-            .ok_or(CandidatePcsError::CommitmentCountMismatch)?;
-        Ok((HidingExtension::ONE - selector) * proofs[0].evals[0] + selector * proofs[1].evals[0])
+    if profile.selector_variables != 0 {
+        let selectors = &full_point.as_slice()[..profile.selector_variables];
+        Ok(proofs
+            .iter()
+            .enumerate()
+            .map(|(index, proof)| {
+                let weight = selectors.iter().enumerate().fold(
+                    HidingExtension::ONE,
+                    |weight, (variable, selector)| {
+                        let bit = (index >> (profile.selector_variables - variable - 1)) & 1;
+                        weight
+                            * if bit == 0 {
+                                HidingExtension::ONE - *selector
+                            } else {
+                                *selector
+                            }
+                    },
+                );
+                weight * proof.evals[0]
+            })
+            .sum())
     } else {
         Ok(proofs[0].evals[0])
     }

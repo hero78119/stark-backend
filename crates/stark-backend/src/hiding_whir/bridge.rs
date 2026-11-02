@@ -8,10 +8,12 @@ use p3_field_08::{
     BasedVectorSpace as HidingBasedVectorSpace, PrimeCharacteristicRing as HidingRing,
     PrimeField64 as HidingPrimeField64,
 };
+use p3_maybe_rayon::prelude::*;
 use p3_multilinear_util_08::{point::Point, poly::Poly};
 use thiserror::Error;
 
 use super::{HidingBase, HidingExtension, OuterBase, OuterExtension};
+use crate::prover::poly::eval_to_coeff_rs_message;
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum BridgeError {
@@ -97,6 +99,73 @@ pub fn pack_columns_at_width(
             .zip(column)
             .for_each(|(out, &value)| *out = base_to_hiding(value));
     }
+    Ok(Poly::new(table))
+}
+
+/// Packs the zero polynomial when a fixed-width selector chunk has no source columns.
+pub fn pack_zero_columns_at_width(
+    column_height: usize,
+    padded_width: usize,
+) -> Result<Poly<HidingBase>, BridgeError> {
+    if column_height == 0
+        || !column_height.is_power_of_two()
+        || padded_width == 0
+        || !padded_width.is_power_of_two()
+    {
+        return Err(BridgeError::InvalidColumnShape);
+    }
+    let table_len = column_height
+        .checked_mul(padded_width)
+        .ok_or(BridgeError::WidthOverflow)?;
+    Ok(Poly::new(vec![HidingBase::ZERO; table_len]))
+}
+
+/// Converts selected evaluation columns directly into one P3 table.
+///
+/// The coefficient vector for each column is released as soon as it is copied into the
+/// destination, avoiding a second full-size `Vec<Vec<_>>` beside the packed witness.
+pub fn pack_eval_columns_at_width(
+    values: &[OuterBase],
+    column_height: usize,
+    column_count: usize,
+    first_column: usize,
+    l_skip: usize,
+    padded_width: usize,
+) -> Result<Poly<HidingBase>, BridgeError> {
+    if column_height == 0
+        || !column_height.is_power_of_two()
+        || padded_width == 0
+        || !padded_width.is_power_of_two()
+        || column_count == 0
+        || values.len()
+            != column_height
+                .checked_mul(column_count)
+                .ok_or(BridgeError::WidthOverflow)?
+        || l_skip > column_height.trailing_zeros() as usize
+    {
+        return Err(BridgeError::InvalidColumnShape);
+    }
+
+    let end_column = first_column.saturating_add(padded_width).min(column_count);
+    let table_len = column_height
+        .checked_mul(padded_width)
+        .ok_or(BridgeError::WidthOverflow)?;
+    let mut table = vec![HidingBase::ZERO; table_len];
+
+    table
+        .par_chunks_exact_mut(column_height)
+        .take(end_column.saturating_sub(first_column))
+        .enumerate()
+        .for_each(|(destination, output)| {
+            let source_column = first_column + destination;
+            let start = source_column * column_height;
+            let coeffs = eval_to_coeff_rs_message(l_skip, &values[start..start + column_height]);
+            output
+                .iter_mut()
+                .zip(coeffs)
+                .for_each(|(dst, value)| *dst = base_to_hiding(value));
+        });
+
     Ok(Poly::new(table))
 }
 

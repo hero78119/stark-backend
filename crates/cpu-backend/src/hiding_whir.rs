@@ -2,8 +2,8 @@ use itertools::Itertools;
 use openvm_stark_backend::{
     hiding_whir::{
         bridge::{self, BridgeError},
-        candidate_commit, candidate_config, candidate_open, candidate_pcs_from_os_rng,
-        candidate_profile, candidate_validate_claims,
+        candidate_commit_witness, candidate_config, candidate_open_with_stage_observer,
+        candidate_pcs_from_os_rng, candidate_profile, candidate_validate_claims,
         transcript::V9Transcript,
         CandidateConfigError, CandidatePcsError, CandidateProfile, HidingCommitment, HidingProof,
         OuterBase, OuterExtension,
@@ -11,7 +11,6 @@ use openvm_stark_backend::{
     poly_common::Squarable,
     proof::{BatchConstraintProof, GkrProof, ProofV9, StackingProof},
     prover::{
-        poly::eval_to_coeff_rs_message,
         stacked_pcs::{stacked_matrix, StackedLayout},
         stacked_reduction::prove_stacked_opening_reduction_from_state,
         ColMajorMatrix, DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
@@ -20,13 +19,12 @@ use openvm_stark_backend::{
 };
 use p3_field::{ExtensionField, PrimeCharacteristicRing, TwoAdicField};
 use p3_matrix::dense::RowMajorMatrix;
-use p3_maybe_rayon::prelude::*;
 use thiserror::Error;
 
 use crate::{
     backend::CpuBackend,
     device::CpuDevice,
-    logup_zerocheck::prove_zerocheck_and_logup,
+    logup_zerocheck::prove_zerocheck_and_logup_with_stage_observer,
     stacked_reduction::{StackedMatrixView, StackedReductionCpuNew},
 };
 
@@ -98,7 +96,8 @@ fn stacked_shape<SC: StarkProtocolConfig>(
 }
 
 /// Proves the existing row-major SWIRL/LogUp/stacking protocol with the V9 hiding PCS.
-/// The caller binds the V9 descriptor into `vk_pre_hash`; PCS/config are fixed from validated trace shape.
+/// The caller binds the V9 descriptor into `vk_pre_hash`; PCS/config are fixed from validated trace
+/// shape.
 pub fn prove_v9<SC>(
     device: &CpuDevice<SC>,
     mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
@@ -117,6 +116,31 @@ where
         Matrix = RowMajorMatrix<SC::F>,
     >,
 {
+    prove_v9_with_stage_observer(device, mpk, ctx, vk_pre_hash, transcript, |_| {})
+}
+
+/// V9 proving entry with coarse stage events for native/WASM profiling.
+pub fn prove_v9_with_stage_observer<SC, O>(
+    device: &CpuDevice<SC>,
+    mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
+    ctx: ProvingContext<CpuBackend<SC>>,
+    vk_pre_hash: SC::Digest,
+    transcript: &mut V9Transcript,
+    on_stage: O,
+) -> Result<ProofV9<SC>, HidingWhirProverError>
+where
+    SC: StarkProtocolConfig<F = OuterBase, EF = OuterExtension, Digest = [OuterBase; 8]>,
+    SC::F: Ord,
+    SC::EF: TwoAdicField + ExtensionField<SC::F> + Ord,
+    O: Fn(&'static str),
+    CpuBackend<SC>: openvm_stark_backend::prover::ProverBackend<
+        Val = SC::F,
+        Challenge = SC::EF,
+        Commitment = SC::Digest,
+        Matrix = RowMajorMatrix<SC::F>,
+    >,
+{
+    on_stage("preflight_started");
     if mpk.per_air.iter().any(|pk| pk.preprocessed_data.is_some())
         || ctx
             .per_trace
@@ -132,6 +156,8 @@ where
     let pcs = candidate_pcs_from_os_rng(candidate_config(profile.num_variables)?)
         .map_err(CandidatePcsError::Randomness)?;
     candidate_validate_claims(&pcs)?;
+    on_stage("preflight_complete");
+    let stage = &on_stage;
 
     let host = openvm_stark_backend::prover::prove_with_pcs::<
         SC,
@@ -149,13 +175,16 @@ where
         vk_pre_hash,
         ctx,
         |transcript: &mut V9Transcript, traces: &[&RowMajorMatrix<SC::F>]| {
+            stage("column_conversion_started");
             let col_major_traces = traces
                 .iter()
                 .map(|trace| ColMajorMatrix::from_row_major(trace))
                 .collect_vec();
+            stage("column_conversion_complete");
             let col_major_refs = col_major_traces.iter().collect_vec();
             let (matrix, layout) =
                 stacked_matrix(mpk.params.l_skip, mpk.params.n_stack, &col_major_refs)?;
+            stage("stacked_matrix_complete");
             if layout.width() != expected_layout.width()
                 || layout.height() != expected_layout.height()
             {
@@ -164,12 +193,55 @@ where
                     actual: params_variables(&layout),
                 });
             }
-            let columns = matrix
-                .values
-                .par_chunks_exact(matrix.height())
-                .map(|column| eval_to_coeff_rs_message(mpk.params.l_skip, column))
-                .collect::<Vec<_>>();
-            let (commitments, prover_data) = candidate_commit(&pcs, &columns, profile, transcript)?;
+            let row_variables = matrix.height().trailing_zeros() as usize;
+            let selector_variables = profile.num_variables.checked_sub(row_variables).ok_or(
+                HidingWhirProverError::VariableCountMismatch {
+                    expected: profile.num_variables,
+                    actual: row_variables,
+                },
+            )?;
+            let target_width = 1usize.checked_shl(selector_variables as u32).ok_or(
+                HidingWhirProverError::VariableCountMismatch {
+                    expected: profile.num_variables,
+                    actual: params_variables(&layout),
+                },
+            )?;
+            let pieces = profile.num_commitments;
+            if (profile.selector_variables != 0 && matrix.width() <= target_width)
+                || (profile.selector_variables == 0 && matrix.width() > target_width)
+                || (profile.selector_variables != 0
+                    && matrix.width() > target_width.saturating_mul(pieces))
+            {
+                return Err(HidingWhirProverError::VariableCountMismatch {
+                    expected: expected_variables,
+                    actual: params_variables(&layout),
+                });
+            }
+            let mut witnesses = Vec::with_capacity(pieces);
+            for piece in 0..pieces {
+                witnesses.push(
+                    bridge::pack_eval_columns_at_width(
+                        &matrix.values,
+                        matrix.height(),
+                        matrix.width(),
+                        piece * target_width,
+                        mpk.params.l_skip,
+                        target_width,
+                    )
+                    .map_err(CandidatePcsError::Bridge)?,
+                );
+            }
+            stage("column_coefficients_complete");
+            stage("pcs_commit_started");
+            let mut commitments = Vec::with_capacity(witnesses.len());
+            let mut prover_data = Vec::with_capacity(witnesses.len());
+            for witness in witnesses {
+                let (commitment, data) =
+                    candidate_commit_witness(&pcs, witness, profile, transcript)?;
+                commitments.push(commitment);
+                prover_data.push(data);
+            }
+            stage("pcs_commit_complete");
             Ok((
                 commitments.clone(),
                 HidingCommitData {
@@ -186,7 +258,10 @@ where
          mpk: &DeviceMultiStarkProvingKey<CpuBackend<SC>>,
          ctx: &ProvingContext<CpuBackend<SC>>,
          _data: &HidingCommitData<SC::F>| {
-            let (gkr, batch, r) = prove_zerocheck_and_logup(transcript, mpk, ctx)?;
+            stage("gkr_logup_started");
+            let (gkr, batch, r) =
+                prove_zerocheck_and_logup_with_stage_observer(transcript, mpk, ctx, stage)?;
+            stage("gkr_logup_complete");
             Ok(((gkr, batch), r))
         },
         |transcript: &mut V9Transcript,
@@ -194,17 +269,26 @@ where
          ctx: ProvingContext<CpuBackend<SC>>,
          data: HidingCommitData<SC::F>,
          r: Vec<SC::EF>| {
+            stage("stacking_reduction_started");
+            let HidingCommitData {
+                matrix,
+                layout,
+                profile,
+                prover_data,
+                commitments,
+            } = data;
             let need_rot = ctx
                 .per_trace
                 .iter()
                 .map(|(air_id, _)| mpk.per_air[*air_id].vk.params.need_rot)
                 .collect_vec();
+            drop(ctx);
             let lambda: SC::EF = <V9Transcript as FiatShamirTranscript<SC>>::sample_ext(transcript);
             let state = StackedReductionCpuNew::from_views(
                 device,
                 vec![StackedMatrixView {
-                    layout: &data.layout,
-                    matrix: &data.matrix,
+                    layout: &layout,
+                    matrix: &matrix,
                 }],
                 vec![need_rot],
                 &r,
@@ -215,6 +299,8 @@ where
                 mpk.params.n_stack,
                 state,
             );
+            drop(matrix);
+            stage("stacking_reduction_complete");
             let (&u0, u_rest) = u_prisma
                 .split_first()
                 .ok_or(HidingWhirProverError::EmptyTraces)?;
@@ -236,19 +322,22 @@ where
                     .flatten()
                     .zip(mu.powers())
                     .fold(SC::EF::ZERO, |sum, (&claim, power)| sum + claim * power);
-                match bridge::packed_opening(mu, data.layout.width(), &u_cube, expected_value) {
+                match bridge::packed_opening(mu, layout.width(), &u_cube, expected_value) {
                     Ok(_) => {
-                        let hiding_proof = candidate_open(
+                        stage("pcs_open_started");
+                        let hiding_proof = candidate_open_with_stage_observer(
                             &pcs,
-                            data.prover_data,
-                            &data.commitments,
-                            data.profile,
+                            prover_data,
+                            &commitments,
+                            profile,
                             mu,
-                            data.layout.width(),
+                            layout.width(),
                             &u_cube,
                             expected_value,
                             transcript,
+                            stage,
                         )?;
+                        stage("pcs_open_complete");
                         return Ok((stacking_proof, mu_pow_witness, hiding_proof));
                     }
                     Err(BridgeError::ZeroSelectorDenominator) => continue,
@@ -258,6 +347,7 @@ where
             Err(HidingWhirProverError::MuRetriesExhausted)
         },
     )?;
+    on_stage("proof_complete");
 
     let (gkr_proof, batch_constraint_proof) = host.constraints_proof;
     let (stacking_proof, mu_pow_witness, hiding_whir_proof) = host.opening_proof;

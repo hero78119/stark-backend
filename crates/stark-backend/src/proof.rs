@@ -303,7 +303,9 @@ impl<SC: EncodableConfig> Encode for Proof<SC> {
 }
 
 #[cfg(feature = "hiding-whir")]
-const V9_CODEC_VERSION: u32 = 5;
+const V9_CODEC_VERSION: u32 = 6;
+#[cfg(feature = "hiding-whir")]
+const V9_MAX_COMMITMENTS: usize = 4;
 
 #[cfg(feature = "hiding-whir")]
 const V9_MAX_WIRE_BYTES: usize = 64 * 1024 * 1024;
@@ -324,7 +326,7 @@ impl<SC: EncodableConfig> Encode for ProofV9<SC> {
         let mut writer = V9LimitedWriter::new(writer);
         V9_CODEC_VERSION.encode(&mut writer)?;
         if self.common_main_commits.is_empty()
-            || self.common_main_commits.len() > 2
+            || self.common_main_commits.len() > V9_MAX_COMMITMENTS
             || self.hiding_whir_proofs.len() != self.common_main_commits.len()
         {
             return Err(Error::other("invalid V9 PCS commitment/proof count"));
@@ -943,7 +945,7 @@ impl<SC: DecodableConfig> Decode for ProofV9<SC> {
         }
 
         let num_commitments = usize::decode(&mut reader)?;
-        if !(1..=2).contains(&num_commitments) {
+        if !(1..=V9_MAX_COMMITMENTS).contains(&num_commitments) {
             return Err(Error::other("invalid V9 PCS commitment/proof count"));
         }
         let mut commitment_limits = DecodeLimits::for_commitment(V9_MAX_DIMENSION, 1024);
