@@ -1,4 +1,4 @@
-use core::{fmt::Debug, fmt::Display};
+use core::fmt::{Debug, Display};
 
 use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 use thiserror::Error;

@@ -14,6 +14,11 @@ use p3_multilinear_util_08::{point::Point, poly::Poly};
 use p3_symmetric_08::MerkleCap;
 use rand_10::{rngs::StdRng, SeedableRng};
 
+use super::{
+    bridge, candidate_challenger, candidate_config, candidate_pcs, candidate_profile,
+    raw_candidate_challenger, HidingBase, HidingCommitment, HidingExtension, HidingMerkleMmcs,
+    HidingPcs, OuterExtension,
+};
 use crate::{
     config::{SystemParams, WhirProximityStrategy},
     hasher::Hasher,
@@ -26,12 +31,6 @@ use crate::{
     prover::poly::{eval_to_coeff_rs_message, evals_mobius_eq_hypercube, Mle},
     test_utils::dummy_airs::fib_air::air::FibonacciAir,
     FiatShamirTranscript, StarkProtocolConfig,
-};
-
-use super::{
-    bridge, candidate_challenger, candidate_config, candidate_pcs, candidate_profile,
-    raw_candidate_challenger, HidingBase, HidingCommitment, HidingExtension, HidingMerkleMmcs,
-    HidingPcs, OuterExtension,
 };
 
 type OuterPerm = Poseidon2BabyBear<16>;
@@ -105,7 +104,7 @@ fn outer_ext(coefficients: [u64; 4]) -> OuterExtension {
 fn hiding_coefficients(value: HidingExtension) -> [u64; 8] {
     <HidingExtension as HidingBvs<HidingBase>>::as_basis_coefficients_slice(&value)
         .iter()
-        .map(|coefficient| HidingPrimeField64::as_canonical_u64(coefficient))
+        .map(HidingPrimeField64::as_canonical_u64)
         .collect::<Vec<_>>()
         .try_into()
         .unwrap()
@@ -367,7 +366,10 @@ fn hiding_whir_fused_column_conversion_matches_the_previous_adapter() {
         let previous =
             bridge::pack_columns_at_width(&converted[start..(start + width).min(5)], width)
                 .unwrap();
-        let fused = bridge::pack_eval_columns_at_width(&values, 8, 5, start, 1, width).unwrap();
+        let fused = bridge::pack_eval_columns_at_width(&values, 8, 5, start, 1, width, |column| {
+            eval_to_coeff_rs_message(1, column)
+        })
+        .unwrap();
         assert_eq!(
             previous.as_slice(),
             fused.as_slice(),
@@ -376,7 +378,10 @@ fn hiding_whir_fused_column_conversion_matches_the_previous_adapter() {
         );
     }
 
-    let empty_piece = bridge::pack_eval_columns_at_width(&values, 8, 5, 6, 1, 2).unwrap();
+    let empty_piece = bridge::pack_eval_columns_at_width(&values, 8, 5, 6, 1, 2, |column| {
+        eval_to_coeff_rs_message(1, column)
+    })
+    .unwrap();
     assert!(empty_piece
         .as_slice()
         .iter()
@@ -437,7 +442,7 @@ fn hiding_whir_pinned_candidate_config_fits_and_reports() {
     assert!(candidate_config(27).is_err());
     assert!(candidate_config(24).is_err());
     assert!(candidate_config(usize::MAX).is_err());
-    let accepted = (0..=HidingBase::TWO_ADICITY as usize - 1)
+    let accepted = (0..=HidingBase::TWO_ADICITY - 1)
         .filter_map(|dimension| match candidate_config(dimension) {
             Ok(config) => Some((dimension, config)),
             Err(error) => {
@@ -453,7 +458,7 @@ fn hiding_whir_pinned_candidate_config_fits_and_reports() {
 
     for (dimension, config) in &accepted {
         config.validate_initial_claims(1).unwrap();
-        assert!(*dimension + config.starting_log_inv_rate <= HidingBase::TWO_ADICITY as usize);
+        assert!(*dimension + config.starting_log_inv_rate <= HidingBase::TWO_ADICITY);
         assert!(config.sumcheck_mask().domain_size.is_power_of_two());
         assert!(
             config.sumcheck_mask().domain_size.trailing_zeros() as usize
@@ -564,7 +569,7 @@ fn hiding_whir_p3_challenger_matches_v9_outer_transcript_adapter() {
 
 #[test]
 fn hiding_whir_prover_verifier_transcript_events_match() {
-    let dimension = (0..=HidingBase::TWO_ADICITY as usize - 1)
+    let dimension = (0..=HidingBase::TWO_ADICITY - 1)
         .find(|&dimension| candidate_config(dimension).is_ok())
         .expect("the fixed candidate must accept at least one dimension");
     let config = candidate_config(dimension).unwrap();

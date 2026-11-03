@@ -1474,7 +1474,7 @@ where
         transcript,
         gkr_input_evals,
         true,
-        |stage| on_stage(stage),
+        &on_stage,
     )?;
     on_stage("gkr_fractional_sumcheck_complete");
 

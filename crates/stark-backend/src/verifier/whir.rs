@@ -200,6 +200,7 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
                     let merkle_proof = &merkle_proofs[query_idx];
                     merkle_verify(hasher, commit, index as u32, query_digest, merkle_proof)?;
 
+                    #[allow(clippy::needless_range_loop)]
                     for c in 0..width {
                         let mu_pow = mu_pow_iter.next().unwrap(); // ok; mu_pows has total_width length
                         for j in 0..(1 << k_whir) {

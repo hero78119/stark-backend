@@ -23,9 +23,10 @@ use thiserror::Error;
 
 use crate::{
     backend::CpuBackend,
-    device::CpuDevice,
+    device::{eval_to_coeff_cpu, CpuDevice},
     logup_zerocheck::prove_zerocheck_and_logup_with_stage_observer,
     stacked_reduction::{StackedMatrixView, StackedReductionCpuNew},
+    two_adic::DftTwiddles,
 };
 
 #[derive(Debug, Error)]
@@ -207,10 +208,10 @@ where
                 },
             )?;
             let pieces = profile.num_commitments;
-            if (profile.selector_variables != 0 && matrix.width() <= target_width)
-                || (profile.selector_variables == 0 && matrix.width() > target_width)
-                || (profile.selector_variables != 0
-                    && matrix.width() > target_width.saturating_mul(pieces))
+            let single_commitment = profile.selector_variables == 0;
+            let width_is_single = matrix.width() <= target_width;
+            let width_exceeds_pieces = matrix.width() > target_width.saturating_mul(pieces);
+            if single_commitment != width_is_single || (!single_commitment && width_exceeds_pieces)
             {
                 return Err(HidingWhirProverError::VariableCountMismatch {
                     expected: expected_variables,
@@ -218,6 +219,7 @@ where
                 });
             }
             let mut witnesses = Vec::with_capacity(pieces);
+            let dft_twiddles = DftTwiddles::new(mpk.params.l_skip);
             for piece in 0..pieces {
                 witnesses.push(
                     bridge::pack_eval_columns_at_width(
@@ -227,6 +229,7 @@ where
                         piece * target_width,
                         mpk.params.l_skip,
                         target_width,
+                        |column| eval_to_coeff_cpu(column, &dft_twiddles),
                     )
                     .map_err(CandidatePcsError::Bridge)?,
                 );

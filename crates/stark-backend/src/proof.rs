@@ -2,20 +2,18 @@ use std::io::{Error, Read, Result, Write};
 
 use derivative::Derivative;
 use p3_field::PrimeCharacteristicRing;
-use serde::{Deserialize, Serialize};
-
 #[cfg(feature = "hiding-whir")]
 use serde::de::DeserializeOwned;
-
-use crate::{
-    codec::{vec_with_capped_capacity, DecodableConfig, Decode, EncodableConfig, Encode},
-    StarkProtocolConfig,
-};
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "hiding-whir")]
 use crate::hiding_whir::{
     codec::{decode_bounded, DecodeLimits},
     HidingCommitment, HidingProof,
+};
+use crate::{
+    codec::{vec_with_capped_capacity, DecodableConfig, Decode, EncodableConfig, Encode},
+    StarkProtocolConfig,
 };
 
 #[derive(Derivative, Serialize, Deserialize)]

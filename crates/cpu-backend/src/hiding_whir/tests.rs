@@ -1,34 +1,96 @@
 use std::{io::Cursor, sync::Arc};
 
-use openvm_stark_backend::hiding_whir::{raw_candidate_challenger, transcript::V9Transcript};
-use openvm_stark_backend::test_utils::dummy_airs::fib_air::air::FibonacciAir;
 use openvm_stark_backend::{
     codec::{Decode, EncodableConfig, Encode},
-    hiding_whir::candidate_challenger,
+    hiding_whir::{
+        bridge, candidate_challenger, raw_candidate_challenger, transcript::V9Transcript,
+    },
     keygen::MultiStarkKeygenBuilder,
     prover::{
         stacked_reduction::{prove_stacked_opening_reduction_from_state, StackedReductionProver},
         DeviceDataTransporter, ProvingContext, TraceCommitter,
     },
     test_utils::{
-        test_system_params_small, CachedFixture11, FibFixture, InteractionsFixture11,
-        PreprocessedFibFixture, TestFixture,
+        dummy_airs::fib_air::air::FibonacciAir, test_system_params_small, CachedFixture11,
+        FibFixture, InteractionsFixture11, PreprocessedFibFixture, TestFixture,
     },
     verifier::hiding_whir::verify_v9,
     FiatShamirTranscript, StarkProtocolConfig,
 };
 use openvm_stark_sdk::config::baby_bear_poseidon2::BabyBearPoseidon2Config;
-use p3_field::PrimeCharacteristicRing;
+use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
 use super::prove_v9;
 use crate::{
+    device::eval_to_coeff_cpu,
     stacked_reduction::{StackedMatrixView, StackedReductionCpuNew},
+    two_adic::DftTwiddles,
     CpuDevice,
 };
 
 type SC = BabyBearPoseidon2Config;
 type F = <SC as StarkProtocolConfig>::F;
 type EF = <SC as StarkProtocolConfig>::EF;
+
+#[test]
+fn hiding_whir_cpu_column_conversion_matches_generic() {
+    use openvm_stark_backend::prover::poly::eval_to_coeff_rs_message;
+
+    const POPULATED_COLUMNS: usize = 5;
+    for (column_height, l_skip) in [(1, 0), (2, 1), (16, 4), (64, 4)] {
+        let values = (0..column_height * POPULATED_COLUMNS)
+            .map(|index| match index % 4 {
+                0 => F::ZERO,
+                1 => F::ONE,
+                2 => F::from_u64(F::ORDER_U64 - 1),
+                _ => F::from_u64((index as u64 * 0x9e37_79b9) % F::ORDER_U64),
+            })
+            .collect::<Vec<_>>();
+        let twiddles = DftTwiddles::new(l_skip);
+
+        // Five populated columns are converted in power-of-two pieces, including one
+        // partially occupied piece and an out-of-range piece that must stay zero.
+        for first_column in [0, 4, 8] {
+            let generic = bridge::pack_eval_columns_at_width(
+                &values,
+                column_height,
+                POPULATED_COLUMNS,
+                first_column,
+                l_skip,
+                4,
+                |column| eval_to_coeff_rs_message(l_skip, column),
+            )
+            .unwrap();
+            let cpu = bridge::pack_eval_columns_at_width(
+                &values,
+                column_height,
+                POPULATED_COLUMNS,
+                first_column,
+                l_skip,
+                4,
+                |column| eval_to_coeff_cpu(column, &twiddles),
+            )
+            .unwrap();
+            assert_eq!(cpu.as_slice(), generic.as_slice());
+        }
+
+        assert!(matches!(
+            bridge::pack_eval_columns_at_width(
+                &values,
+                column_height,
+                POPULATED_COLUMNS,
+                0,
+                l_skip,
+                1,
+                |_| Vec::new(),
+            ),
+            Err(openvm_stark_backend::hiding_whir::bridge::BridgeError::InvalidConvertedColumnLength {
+                expected,
+                actual: 0,
+            }) if expected == column_height
+        ));
+    }
+}
 
 fn setup(
     params: openvm_stark_backend::SystemParams,

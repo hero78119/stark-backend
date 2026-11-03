@@ -13,7 +13,6 @@ use p3_multilinear_util_08::{point::Point, poly::Poly};
 use thiserror::Error;
 
 use super::{HidingBase, HidingExtension, OuterBase, OuterExtension};
-use crate::prover::poly::eval_to_coeff_rs_message;
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum BridgeError {
@@ -23,6 +22,8 @@ pub enum BridgeError {
     InvalidColumnShape,
     #[error("stacked width is too large")]
     WidthOverflow,
+    #[error("column converter returned {actual} coefficients; expected {expected}")]
+    InvalidConvertedColumnLength { expected: usize, actual: usize },
     #[error("cube point length does not match the stacked table")]
     PointArityMismatch,
     #[error("selector denominator is zero for this batching challenge")]
@@ -131,6 +132,7 @@ pub fn pack_eval_columns_at_width(
     first_column: usize,
     l_skip: usize,
     padded_width: usize,
+    convert: impl Fn(&[OuterBase]) -> Vec<OuterBase> + Sync,
 ) -> Result<Poly<HidingBase>, BridgeError> {
     if column_height == 0
         || !column_height.is_power_of_two()
@@ -156,15 +158,22 @@ pub fn pack_eval_columns_at_width(
         .par_chunks_exact_mut(column_height)
         .take(end_column.saturating_sub(first_column))
         .enumerate()
-        .for_each(|(destination, output)| {
+        .try_for_each(|(destination, output)| {
             let source_column = first_column + destination;
             let start = source_column * column_height;
-            let coeffs = eval_to_coeff_rs_message(l_skip, &values[start..start + column_height]);
+            let coeffs = convert(&values[start..start + column_height]);
+            if coeffs.len() != column_height {
+                return Err(BridgeError::InvalidConvertedColumnLength {
+                    expected: column_height,
+                    actual: coeffs.len(),
+                });
+            }
             output
                 .iter_mut()
                 .zip(coeffs)
                 .for_each(|(dst, value)| *dst = base_to_hiding(value));
-        });
+            Ok(())
+        })?;
 
     Ok(Poly::new(table))
 }

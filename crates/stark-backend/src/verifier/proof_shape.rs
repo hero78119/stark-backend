@@ -541,8 +541,6 @@ pub fn verify_outer_proof_shape<SC: StarkProtocolConfig>(
     }
 
     // STACKING PROOF SHAPE
-    let stacking_proof = stacking_proof;
-
     let s_0_deg = 2 * ((1 << l_skip) - 1);
     if stacking_proof.univariate_round_coeffs.len() != s_0_deg + 1 {
         return ProofShapeError::invalid_stacking(

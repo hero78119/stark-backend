@@ -68,7 +68,7 @@ where
     verify_with_pcs(
         config,
         mvk,
-        mvk.pre_hash.clone(),
+        mvk.pre_hash,
         OuterProofRef {
             trace_vdata: &proof.trace_vdata,
             public_values: &proof.public_values,
@@ -86,12 +86,12 @@ where
             )
             .map_err(VerifierError::from)
         },
-        |transcript| transcript.observe_commit(proof.common_main_commit.clone()),
+        |transcript| transcript.observe_commit(proof.common_main_commit),
         |transcript, _layouts, trace_id_to_air_id, u_cube| {
-            let mut commits = vec![proof.common_main_commit.clone()];
+            let mut commits = vec![proof.common_main_commit];
             for &air_id in trace_id_to_air_id {
                 if let Some(preprocessed) = &mvk.inner.per_air[air_id].preprocessed_data {
-                    commits.push(preprocessed.commit.clone());
+                    commits.push(preprocessed.commit);
                 }
                 commits.extend(
                     &proof.trace_vdata[air_id]
@@ -113,6 +113,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_with_pcs<SC, TS, E>(
     config: &SC,
     mvk: &MultiStarkVerifyingKey<SC>,

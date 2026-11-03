@@ -20,9 +20,7 @@ type SC = BabyBearPoseidon2Config;
 
 #[test]
 fn owned_in_place_fractional_sumcheck_matches_reference() -> eyre::Result<()> {
-    let mut values = (0..16)
-        .map(|value| EF::from_usize(value))
-        .collect::<Vec<_>>();
+    let mut values = (0..16).map(EF::from_usize).collect::<Vec<_>>();
     let sum = values.iter().copied().sum::<EF>();
     values[15] = -sum + values[15];
     let fractions = values

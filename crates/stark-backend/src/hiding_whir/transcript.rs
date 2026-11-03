@@ -1,5 +1,8 @@
 //! One Plonky3 0.8 challenger shared by the V9 outer IOP and hiding PCS.
 
+#[cfg(any(test, feature = "test-utils"))]
+use std::sync::{Arc, Mutex};
+
 use p3_challenger_08::{
     CanObserve, CanSample, CanSampleBits, CanSampleUniformBits, FieldChallenger, GrindingChallenger,
 };
@@ -7,12 +10,8 @@ use p3_field::{PrimeCharacteristicRing as OuterRing, PrimeField64 as OuterPrimeF
 use p3_field_08::{PrimeCharacteristicRing as HidingRing, PrimeField64 as HidingPrimeField64};
 use p3_maybe_rayon::prelude::*;
 
-#[cfg(any(test, feature = "test-utils"))]
-use std::sync::{Arc, Mutex};
-
-use crate::{FiatShamirTranscript, StarkProtocolConfig};
-
 use super::{HidingBase, OuterBase, OuterExtension, RawHidingChallenger};
+use crate::{FiatShamirTranscript, StarkProtocolConfig};
 
 #[derive(Clone, Debug)]
 pub struct V9Transcript {

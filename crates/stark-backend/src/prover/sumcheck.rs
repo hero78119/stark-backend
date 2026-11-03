@@ -353,10 +353,9 @@ where
     #[cfg(feature = "parallel")]
     let evals = (0..1 << hypercube_dim)
         .into_par_iter()
-        .fold(
-            || new_scratch(),
-            |(row_x_y, sums), y| evaluate_y(row_x_y, sums, y),
-        )
+        .fold(new_scratch, |(row_x_y, sums), y| {
+            evaluate_y(row_x_y, sums, y)
+        })
         .map(|(_, sums)| sums)
         .reduce(|| vec![[F::ZERO; WD]; d], hypercube_sum);
     #[cfg(not(feature = "parallel"))]

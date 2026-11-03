@@ -442,7 +442,7 @@ where
         self.q_evals = self
             .stacked_per_commit
             .iter()
-            .map(|d| fold_ple_evals_cpu(l_skip, &d.matrix, u_0))
+            .map(|d| fold_ple_evals_cpu(l_skip, d.matrix, u_0))
             .collect_vec();
         let eq_uni_u0r0 = eval_eq_uni(l_skip, u_0, r_0);
         let eq_uni_u0r0_rot = eval_eq_uni(l_skip, u_0, r_0 * omega_skip);

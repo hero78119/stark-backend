@@ -50,6 +50,7 @@ pub trait Prover {
 }
 
 /// Shared outer transcript and proof orchestration for backends with different PCS types.
+#[allow(clippy::too_many_arguments)]
 pub fn prove_with_pcs<SC, PB, TS, C, D, CP, A, OP, E>(
     transcript: &mut TS,
     mpk: &DeviceMultiStarkProvingKey<PB>,
@@ -104,7 +105,7 @@ where
             cached_commitments: trace_ctx
                 .cached_mains
                 .iter()
-                .map(|cd| cd.commitment.clone())
+                .map(|cd| cd.commitment)
                 .collect(),
         });
         public_values[*air_id] = trace_ctx.public_values.clone();
@@ -122,12 +123,12 @@ where
         }
         if let Some(trace_vdata) = trace_vdata {
             if let Some(cd) = &pk.preprocessed_data {
-                transcript.observe_commit(cd.commitment.clone());
+                transcript.observe_commit(cd.commitment);
             } else {
                 transcript.observe(SC::F::from_usize(trace_vdata.log_height));
             }
             for commit in &trace_vdata.cached_commitments {
-                transcript.observe_commit(commit.clone());
+                transcript.observe_commit(*commit);
             }
         }
         for pv in pvs {
@@ -205,7 +206,7 @@ where
         >(
             transcript,
             mpk,
-            mpk.vk_pre_hash.clone(),
+            mpk.vk_pre_hash,
             unsorted_ctx,
             |_, traces| {
                 (stage.borrow_mut())("pcs_commit_started");
@@ -213,7 +214,7 @@ where
                 (stage.borrow_mut())("pcs_commit_complete");
                 result
             },
-            |transcript, commitment| transcript.observe_commit(commitment.clone()),
+            |transcript, commitment| transcript.observe_commit(*commitment),
             |transcript, mpk, ctx, pcs_data| {
                 (stage.borrow_mut())("gkr_logup_started");
                 let result = device

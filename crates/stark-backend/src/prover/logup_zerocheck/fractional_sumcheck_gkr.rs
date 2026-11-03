@@ -361,7 +361,7 @@ fn fold_eq_evals_in_place<EF: Field>(values: &mut Vec<EF>, r: EF) {
 
 fn set_frac_field<EF>(values: &mut [Frac<EF>], start: usize, index: usize, value: EF) {
     let target = &mut values[start + index / 2];
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         target.p = value;
     } else {
         target.q = value;
@@ -370,7 +370,7 @@ fn set_frac_field<EF>(values: &mut [Frac<EF>], start: usize, index: usize, value
 
 fn frac_field<EF: Copy>(values: &[Frac<EF>], start: usize, index: usize) -> EF {
     let source = &values[start + index / 2];
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         source.p
     } else {
         source.q

@@ -104,7 +104,7 @@ pub struct CandidateProfile {
 pub fn candidate_profile(
     actual_variables: usize,
 ) -> Result<CandidateProfile, CandidateConfigError> {
-    let max_variables = HidingBase::TWO_ADICITY as usize - 1;
+    let max_variables = HidingBase::TWO_ADICITY - 1;
     if actual_variables > max_variables + 1 {
         return Err(CandidateConfigError::UnsupportedDimension {
             num_variables: actual_variables,
@@ -145,7 +145,7 @@ pub enum CandidateConfigError {
 }
 
 pub fn candidate_config(num_variables: usize) -> Result<HidingConfig, CandidateConfigError> {
-    let max_variables = HidingBase::TWO_ADICITY as usize - 1;
+    let max_variables = HidingBase::TWO_ADICITY - 1;
     if num_variables > max_variables {
         return Err(CandidateConfigError::UnsupportedDimension {
             num_variables,
@@ -339,6 +339,7 @@ pub fn candidate_observe_commitment(
     MultilinearPcs::observe_commitment(pcs, commitment, challenger);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn candidate_open(
     pcs: &HidingPcs,
     prover_data: Vec<HidingProverData>,
@@ -364,6 +365,7 @@ pub fn candidate_open(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn candidate_open_with_stage_observer<O: Fn(&'static str)>(
     pcs: &HidingPcs,
     prover_data: Vec<HidingProverData>,
@@ -488,6 +490,7 @@ fn combine_opening_claims(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn candidate_verify(
     pcs: &HidingPcs,
     commitments: &[HidingCommitment],
